@@ -14,18 +14,21 @@ pub struct GuestReg {
 }
 
 impl GuestReg {
-    #[inline]
-    pub const fn x(num: u8) -> Self { Self { num, width: RegWidth::X64, kind: if num == 31 { RegKind::Zero } else { RegKind::General } } }
-    #[inline]
-    pub const fn w(num: u8) -> Self { Self { num, width: RegWidth::W32, kind: if num == 31 { RegKind::Zero } else { RegKind::General } } }
-    #[inline]
-    pub const fn xsp() -> Self { Self { num: 31, width: RegWidth::X64, kind: RegKind::StackPointer } }
-    #[inline]
-    pub const fn wsp() -> Self { Self { num: 31, width: RegWidth::W32, kind: RegKind::StackPointer } }
+    #[inline] pub const fn x(num: u8) -> Self { Self { num, width: RegWidth::X64, kind: if num == 31 { RegKind::Zero } else { RegKind::General } } }
+    #[inline] pub const fn w(num: u8) -> Self { Self { num, width: RegWidth::W32, kind: if num == 31 { RegKind::Zero } else { RegKind::General } } }
+    #[inline] pub const fn xsp() -> Self { Self { num: 31, width: RegWidth::X64, kind: RegKind::StackPointer } }
+    #[inline] pub const fn wsp() -> Self { Self { num: 31, width: RegWidth::W32, kind: RegKind::StackPointer } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShiftKind { Lsl, Lsr, Asr, Ror }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemOperand {
+    pub base: GuestReg,
+    pub offset: i32,
+    pub width: RegWidth,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operand {
@@ -38,6 +41,7 @@ pub enum Operand {
     RawInst(u32),
     ShiftedReg { reg: GuestReg, kind: ShiftKind, amount: u8 },
     ShiftReg { value: GuestReg, amount: GuestReg, kind: ShiftKind },
+    Mem(MemOperand),
 }
 
 impl Operand {
@@ -45,6 +49,7 @@ impl Operand {
     #[inline] pub const fn value(value: Value) -> Self { Self::Value(value) }
     #[inline] pub const fn imm(value: u64) -> Self { Self::Imm(value) }
     #[inline] pub const fn raw_inst(word: u32) -> Self { Self::RawInst(word) }
+    #[inline] pub const fn mem(base: GuestReg, offset: i32, width: RegWidth) -> Self { Self::Mem(MemOperand { base, offset, width }) }
 }
 
 #[cfg(test)]
@@ -63,5 +68,11 @@ mod tests {
     fn widths_are_explicit() {
         assert_eq!(GuestReg::x(0).width, RegWidth::X64);
         assert_eq!(GuestReg::w(0).width, RegWidth::W32);
+    }
+
+    #[test]
+    fn memory_operand_preserves_width_and_offset() {
+        let op = Operand::mem(GuestReg::x(3), 16, RegWidth::X64);
+        assert_eq!(op, Operand::Mem(MemOperand { base: GuestReg::x(3), offset: 16, width: RegWidth::X64 }));
     }
 }
