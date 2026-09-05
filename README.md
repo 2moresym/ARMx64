@@ -1,15 +1,22 @@
 # ARMx64
 
-High-performance AArch64 to x86-64 dynamic translation.
+A high-performance AArch64 to x86-64 dynamic translation engine written in Rust.
 
-## Current architecture
+## Architecture Overview
 
-- Single packed ARMx64 IR
-- SSA-style `Value(u32)` identifiers
-- Cold block code generation
-- Hotness counters for promotion
-- Lock-free code-cache pointer publication
-- Fixed-offset guest memory abstraction
-- x86-64-v2 target baseline
+- **Single Packed IR**: Clean and efficient intermediate representation optimized for translation.
+- **SSA-style Identifiers**: `Value(u32)` based static single assignment formulation.
+- **Adaptive Compilation**: Hotness counters for trace detection and promotion.
+- **Lock-free Caches**: Lock-free code-cache pointer publication for low-overhead dispatch.
+- **Guest Memory Model**: Fixed-offset guest memory abstraction for fast address translation.
+- **Modern Baseline**: Targeting x86-64-v2 architecture baseline.
 
-Trace compilation, lazy NZCV, register allocation, and direct machine-code emission are being built incrementally on top of this foundation.
+## Status & Roadmap
+
+Trace compilation, lazy NZCV flag evaluation, register allocation, and direct machine-code emission are currently being built incrementally on top of this foundation.
+
+## License
+
+Licensed under either of:
+- MIT License (`LICENSE-MIT` or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 (`LICENSE-APACHE` or http://www.apache.org/licenses/LICENSE-2.0)
