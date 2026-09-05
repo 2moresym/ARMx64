@@ -4,4 +4,4 @@ mod state;
 
 pub use dispatch::Dispatcher;
 pub use memory::{GuestMemory, HOST_BASE};
-pub use state::{GuestState, GPR_BASE, SP_OFFSET};
+pub use state::{GuestState, GPR_BASE, PC_OFFSET, SP_OFFSET};
