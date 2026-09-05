@@ -4,6 +4,7 @@ use super::Value;
 #[repr(u16)]
 pub enum Opcode {
     Nop,
+    Unsupported,
     Mov,
     Add,
     Sub,
@@ -20,6 +21,9 @@ pub enum Opcode {
     Call,
     Ret,
 }
+
+/// `flags` bit indicating that an arithmetic/logical instruction writes NZCV.
+pub const FLAG_WRITES_NZCV: u16 = 1 << 0;
 
 /// Fixed-width IR instruction. Kept compact for cache-friendly passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
