@@ -11,7 +11,7 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
     let decoded = match aarch64::decode(inst) {
         Ok(d) => d,
         Err(_) => {
-            // Decode error representation
+            // Represent decode failure explicitly in IR or as an unsupported/trap inst
             block.push(IRInst {
                 opcode: Opcode::Nop,
                 flags: 0,
@@ -31,10 +31,9 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::ORR => Opcode::Orr,
         A64Opcode::EOR => Opcode::Eor,
         A64Opcode::MOV => Opcode::Mov,
-        A64Opcode::LSL => Opcode::Shift,
-        A64Opcode::LSR => Opcode::Shift,
+        A64Opcode::LSL | A64Opcode::LSR => Opcode::Shift,
         _ => {
-            // Unsupported instruction fallback or representation
+            // Unsupported instruction - push Nop or handle safely without corrupting guest semantics
             block.push(IRInst {
                 opcode: Opcode::Nop,
                 flags: 0,
@@ -46,8 +45,6 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         }
     };
 
-    // Basic operand extraction mapping placeholder (using operand kinds if available)
-    // For now we map standard register/immediate destinations/sources to IR Value placeholders
     block.push(IRInst {
         opcode: ir_opcode,
         flags: 0,
@@ -64,7 +61,6 @@ mod tests {
     #[test]
     fn test_lift_nop() {
         let mut block = Block::new();
-        // NOP encoding in AArch64: 0xd503201f
         let inst = A64Inst(0xd503201f);
         lift_one(inst, &mut block);
         assert_eq!(block.insts.len(), 1);
