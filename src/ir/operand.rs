@@ -38,6 +38,7 @@ pub enum Operand {
     Imm(u64),
     ShiftedImm { value: u16, amount: u8 },
     PCRelative(i64),
+    GuestPc(u64),
     RawInst(u32),
     ShiftedReg { reg: GuestReg, kind: ShiftKind, amount: u8 },
     ShiftReg { value: GuestReg, amount: GuestReg, kind: ShiftKind },
@@ -48,6 +49,7 @@ impl Operand {
     #[inline] pub const fn none() -> Self { Self::None }
     #[inline] pub const fn value(value: Value) -> Self { Self::Value(value) }
     #[inline] pub const fn imm(value: u64) -> Self { Self::Imm(value) }
+    #[inline] pub const fn guest_pc(value: u64) -> Self { Self::GuestPc(value) }
     #[inline] pub const fn raw_inst(word: u32) -> Self { Self::RawInst(word) }
     #[inline] pub const fn mem(base: GuestReg, offset: i32, width: RegWidth) -> Self { Self::Mem(MemOperand { base, offset, width }) }
 }
@@ -74,5 +76,10 @@ mod tests {
     fn memory_operand_preserves_width_and_offset() {
         let op = Operand::mem(GuestReg::x(3), 16, RegWidth::X64);
         assert_eq!(op, Operand::Mem(MemOperand { base: GuestReg::x(3), offset: 16, width: RegWidth::X64 }));
+    }
+
+    #[test]
+    fn guest_pc_is_distinct_from_immediate() {
+        assert_eq!(Operand::guest_pc(0x1234), Operand::GuestPc(0x1234));
     }
 }
