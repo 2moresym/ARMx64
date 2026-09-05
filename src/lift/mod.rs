@@ -1,6 +1,64 @@
 use crate::arch::aarch64::{self, A64Inst};
-use crate::ir::{Block, IRInst, Opcode, Value, FLAG_WRITES_NZCV};
-use yaxpeax_arm::armv8::a64::Opcode as A64Opcode;
+use crate::ir::{
+    Block, GuestReg, IRInst, Opcode, Operand, RegKind, RegWidth, ShiftKind, FLAG_WRITES_NZCV,
+};
+use yaxpeax_arm::armv8::a64::{
+    Opcode as A64Opcode, Operand as A64Operand, ShiftStyle, SizeCode,
+};
+
+#[inline]
+fn lower_reg(size: SizeCode, num: u16, sp: bool) -> Operand {
+    let num = num as u8;
+    let width = match size {
+        SizeCode::X => RegWidth::X64,
+        SizeCode::W => RegWidth::W32,
+    };
+    let kind = if sp {
+        RegKind::StackPointer
+    } else if num == 31 {
+        RegKind::Zero
+    } else {
+        RegKind::General
+    };
+    Operand::Reg(GuestReg { num, width, kind })
+}
+
+#[inline]
+fn lower_shift(style: ShiftStyle) -> Option<ShiftKind> {
+    match style {
+        ShiftStyle::LSL => Some(ShiftKind::Lsl),
+        ShiftStyle::LSR => Some(ShiftKind::Lsr),
+        ShiftStyle::ASR => Some(ShiftKind::Asr),
+        ShiftStyle::ROR => Some(ShiftKind::Ror),
+        _ => None,
+    }
+}
+
+/// Convert the decoder's architectural operand into ARMx64's typed operand.
+/// Unsupported operand forms remain explicit rather than being guessed.
+#[inline]
+fn lower_operand(op: A64Operand) -> Operand {
+    match op {
+        A64Operand::Nothing => Operand::None,
+        A64Operand::Register(size, num) => lower_reg(size, num, false),
+        A64Operand::RegisterOrSP(size, num) => lower_reg(size, num, true),
+        A64Operand::Immediate(value) => Operand::Imm(value as u64),
+        A64Operand::Imm64(value) => Operand::Imm(value),
+        A64Operand::Imm16(value) => Operand::Imm(value as u64),
+        A64Operand::PCOffset(offset) => Operand::PCRelative(offset),
+        A64Operand::ImmShift(value, amount) => Operand::ShiftedImm { value, amount },
+        A64Operand::RegShift(style, amount, size, num) => {
+            match lower_shift(style) {
+                Some(kind) => match lower_reg(size, num, false) {
+                    Operand::Reg(reg) => Operand::ShiftedReg { reg, kind, amount },
+                    _ => Operand::None,
+                },
+                None => Operand::None,
+            }
+        }
+        _ => Operand::None,
+    }
+}
 
 /// Lift one decoded guest instruction into ARMx64 IR.
 ///
@@ -14,9 +72,9 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
             block.push(IRInst {
                 opcode: Opcode::Unsupported,
                 flags: 0,
-                a: Value(inst.0),
-                b: Value(0),
-                c: Value(0),
+                a: Operand::raw_inst(inst.0),
+                b: Operand::None,
+                c: Operand::None,
             });
             return;
         }
@@ -38,9 +96,9 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
             block.push(IRInst {
                 opcode: Opcode::Unsupported,
                 flags: 0,
-                a: Value(inst.0),
-                b: Value(0),
-                c: Value(0),
+                a: Operand::raw_inst(inst.0),
+                b: Operand::None,
+                c: Operand::None,
             });
             return;
         }
@@ -49,9 +107,9 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
     block.push(IRInst {
         opcode: ir_opcode,
         flags,
-        a: Value(0),
-        b: Value(0),
-        c: Value(0),
+        a: lower_operand(decoded.operands[0]),
+        b: lower_operand(decoded.operands[1]),
+        c: lower_operand(decoded.operands[2]),
     });
 }
 
@@ -73,7 +131,7 @@ mod tests {
         lift_one(A64Inst(0xd61f0000), &mut block);
         assert_eq!(block.insts.len(), 1);
         assert_eq!(block.insts[0].opcode, Opcode::Unsupported);
-        assert_eq!(block.insts[0].a, Value(0xd61f0000));
+        assert_eq!(block.insts[0].a, Operand::RawInst(0xd61f0000));
     }
 
     #[test]
