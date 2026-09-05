@@ -1,3 +1,5 @@
+mod block;
+
 use crate::arch::aarch64::{self, A64Inst};
 use crate::ir::{
     Block, GuestReg, IRInst, Opcode, Operand, RegKind, RegWidth, ShiftKind, FLAG_WRITES_NZCV,
@@ -6,20 +8,13 @@ use yaxpeax_arm::armv8::a64::{
     Opcode as A64Opcode, Operand as A64Operand, ShiftStyle, SizeCode,
 };
 
+pub use block::lift_block;
+
 #[inline]
 fn lower_reg(size: SizeCode, num: u16, sp: bool) -> Operand {
     let num = num as u8;
-    let width = match size {
-        SizeCode::X => RegWidth::X64,
-        SizeCode::W => RegWidth::W32,
-    };
-    let kind = if sp {
-        RegKind::StackPointer
-    } else if num == 31 {
-        RegKind::Zero
-    } else {
-        RegKind::General
-    };
+    let width = match size { SizeCode::X => RegWidth::X64, SizeCode::W => RegWidth::W32 };
+    let kind = if sp { RegKind::StackPointer } else if num == 31 { RegKind::Zero } else { RegKind::General };
     Operand::Reg(GuestReg { num, width, kind })
 }
 
@@ -34,8 +29,7 @@ fn lower_shift(style: ShiftStyle) -> Option<ShiftKind> {
     }
 }
 
-/// Convert the decoder's architectural operand into ARMx64's typed operand.
-/// Unsupported operand forms remain explicit rather than being guessed.
+/// Convert a decoder operand into ARMx64's typed operand.
 #[inline]
 fn lower_operand(op: A64Operand) -> Operand {
     match op {
@@ -47,41 +41,37 @@ fn lower_operand(op: A64Operand) -> Operand {
         A64Operand::Imm16(value) => Operand::Imm(value as u64),
         A64Operand::PCOffset(offset) => Operand::PCRelative(offset),
         A64Operand::ImmShift(value, amount) => Operand::ShiftedImm { value, amount },
-        A64Operand::RegShift(style, amount, size, num) => {
-            match lower_shift(style) {
-                Some(kind) => match lower_reg(size, num, false) {
-                    Operand::Reg(reg) => Operand::ShiftedReg { reg, kind, amount },
-                    _ => Operand::None,
-                },
-                None => Operand::None,
-            }
-        }
+        A64Operand::RegShift(style, amount, size, num) => match lower_shift(style) {
+            Some(kind) => match lower_reg(size, num, false) {
+                Operand::Reg(reg) => Operand::ShiftedReg { reg, kind, amount },
+                _ => Operand::None,
+            },
+            None => Operand::None,
+        },
         _ => Operand::None,
     }
 }
 
+#[inline]
+fn unsupported(inst: A64Inst, block: &mut Block) {
+    block.push(IRInst {
+        opcode: Opcode::Unsupported,
+        flags: 0,
+        a: Operand::raw_inst(inst.0),
+        b: Operand::None,
+        c: Operand::None,
+    });
+}
+
 /// Lift one decoded guest instruction into ARMx64 IR.
-///
-/// Unsupported or undecodable instructions are represented explicitly as
-/// `Opcode::Unsupported`; they must never silently become NOPs.
 #[inline]
 pub fn lift_one(inst: A64Inst, block: &mut Block) {
     let decoded = match aarch64::decode(inst) {
         Ok(d) => d,
-        Err(_) => {
-            block.push(IRInst {
-                opcode: Opcode::Unsupported,
-                flags: 0,
-                a: Operand::raw_inst(inst.0),
-                b: Operand::None,
-                c: Operand::None,
-            });
-            return;
-        }
+        Err(_) => { unsupported(inst, block); return; }
     };
 
     let (ir_opcode, flags) = match decoded.opcode {
-        // yaxpeax-arm represents architectural NOP as HINT #0.
         A64Opcode::HINT if decoded.operands[0] == A64Operand::Imm16(0) => (Opcode::Nop, 0),
         A64Opcode::ADD => (Opcode::Add, 0),
         A64Opcode::ADDS => (Opcode::Add, FLAG_WRITES_NZCV),
@@ -91,23 +81,13 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::ANDS => (Opcode::And, FLAG_WRITES_NZCV),
         A64Opcode::ORR => (Opcode::Orr, 0),
         A64Opcode::EOR => (Opcode::Eor, 0),
-        // The decoder exposes MOV aliases as their architectural encodings.
-        // MOVZ is safe to represent as Mov; MOVN remains unsupported until the
-        // IR has an explicit bitwise-invert immediate semantic.
         A64Opcode::MOVZ => (Opcode::Mov, 0),
-        A64Opcode::LSLV | A64Opcode::LSRV | A64Opcode::ASRV | A64Opcode::RORV => {
-            (Opcode::Shift, 0)
-        }
-        _ => {
-            block.push(IRInst {
-                opcode: Opcode::Unsupported,
-                flags: 0,
-                a: Operand::raw_inst(inst.0),
-                b: Operand::None,
-                c: Operand::None,
-            });
-            return;
-        }
+        A64Opcode::LSLV | A64Opcode::LSRV | A64Opcode::ASRV | A64Opcode::RORV => (Opcode::Shift, 0),
+        A64Opcode::B | A64Opcode::BR => (Opcode::Branch, 0),
+        A64Opcode::Bcc(_) | A64Opcode::CBZ | A64Opcode::CBNZ => (Opcode::BranchCond, 0),
+        A64Opcode::BL | A64Opcode::BLR => (Opcode::Call, 0),
+        A64Opcode::RET => (Opcode::Ret, 0),
+        _ => { unsupported(inst, block); return; }
     };
 
     block.push(IRInst {
