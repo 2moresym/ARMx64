@@ -1,5 +1,5 @@
 use crate::ir::{Block, GuestReg, Opcode, Operand, RegKind, RegWidth, ShiftKind};
-use crate::runtime::{GuestState, GPR_BASE, SP_OFFSET};
+use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, SP_OFFSET};
 use memmap2::{Mmap, MmapMut};
 
 pub type GuestFn = unsafe extern "C" fn(*mut GuestState);
@@ -28,9 +28,6 @@ impl CodeBuffer {
     fn store_state(&mut self, guest: GuestReg, reg: X86Scratch) {
         if guest.kind == RegKind::Zero { return; }
         let disp = if guest.kind == RegKind::StackPointer { SP_OFFSET } else { GPR_BASE + guest.num as i32 * 8 };
-        // AArch64 W writes zero-extend into the corresponding X register.
-        // RAX/RCX are already zero-extended by every W32 operation we emit, so
-        // always store the full 64-bit value to keep the architectural state exact.
         self.mov_store(disp, reg, RegWidth::X64);
     }
 
@@ -50,27 +47,29 @@ impl CodeBuffer {
         match (reg, width) {
             (X86Scratch::Rax, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xB8); self.emit64(value); }
             (X86Scratch::Rcx, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xB9); self.emit64(value); }
+            (X86Scratch::Rdx, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xBA); self.emit64(value); }
             (X86Scratch::Rax, RegWidth::W32) => { self.emit8(0xB8); self.emit32(value as u32); }
             (X86Scratch::Rcx, RegWidth::W32) => { self.emit8(0xB9); self.emit32(value as u32); }
+            (X86Scratch::Rdx, RegWidth::W32) => { self.emit8(0xBA); self.emit32(value as u32); }
         }
     }
 
     #[inline]
     fn mov_load(&mut self, reg: X86Scratch, disp: i32, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x8B);
-        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F }); self.emit32(disp as u32);
+        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97 }); self.emit32(disp as u32);
     }
 
     #[inline]
     fn mov_store(&mut self, disp: i32, reg: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x89);
-        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F }); self.emit32(disp as u32);
+        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97 }); self.emit32(disp as u32);
     }
 
     #[inline]
     fn xor(&mut self, dst: X86Scratch, src: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x31);
-        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9 });
+        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9, _ => unreachable!() });
     }
 
     #[inline]
@@ -84,7 +83,7 @@ impl CodeBuffer {
     fn shift_imm(&mut self, reg: X86Scratch, kind: ShiftKind, amount: u8, width: RegWidth) {
         if amount == 0 { return; }
         self.rex(width == RegWidth::X64); self.emit8(0xC1);
-        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9 };
+        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9, _ => unreachable!() };
         self.emit8(rm); self.emit8(amount);
     }
 
@@ -92,6 +91,23 @@ impl CodeBuffer {
     fn shift_reg(&mut self, kind: ShiftKind, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0xD3);
         self.emit8(match kind { ShiftKind::Lsl => 0xE0, ShiftKind::Lsr => 0xE8, ShiftKind::Asr => 0xF8, ShiftKind::Ror => 0xC8 });
+    }
+
+    #[inline]
+    fn emit_guest_address(&mut self, base: GuestReg) {
+        self.load_state(X86Scratch::Rax, base);
+        self.mov_imm(X86Scratch::Rdx, HOST_BASE as u64, RegWidth::X64);
+        self.rex(true); self.emit8(0x01); self.emit8(0xD0);
+    }
+
+    #[inline]
+    fn emit_mem_load(&mut self, width: RegWidth, offset: i32) {
+        self.rex(width == RegWidth::X64); self.emit8(0x8B); self.emit8(0x80); self.emit32(offset as u32);
+    }
+
+    #[inline]
+    fn emit_mem_store(&mut self, width: RegWidth, offset: i32) {
+        self.rex(width == RegWidth::X64); self.emit8(0x89); self.emit8(0x88); self.emit32(offset as u32);
     }
 
     pub fn emit_block(&mut self, block: &Block) -> Result<(), CodegenError> {
@@ -114,6 +130,16 @@ impl CodeBuffer {
                     match inst.c { Operand::ShiftReg { amount, kind, .. } => { self.load_state(X86Scratch::Rcx, amount); self.shift_reg(kind, dest.width); }, _ => return Err(CodegenError::UnsupportedOperand) }
                     self.store_state(dest, X86Scratch::Rax);
                 }
+                Opcode::Load => {
+                    let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
+                    let mem = match inst.b { Operand::Mem(m) => m, _ => return Err(CodegenError::UnsupportedOperand) };
+                    self.emit_guest_address(mem.base); self.emit_mem_load(mem.width, mem.offset); self.store_state(dest, X86Scratch::Rax);
+                }
+                Opcode::Store => {
+                    let mem = match inst.a { Operand::Mem(m) => m, _ => return Err(CodegenError::UnsupportedOperand) };
+                    let src = match inst.b { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
+                    self.load_state(X86Scratch::Rcx, src); self.emit_guest_address(mem.base); self.emit_mem_store(mem.width, mem.offset);
+                }
                 _ => return Err(CodegenError::UnsupportedOpcode(inst.opcode)),
             }
         }
@@ -123,7 +149,7 @@ impl CodeBuffer {
     pub fn into_executable(self) -> Result<ExecutableCode, std::io::Error> { ExecutableCode::from_bytes(&self.bytes) }
 }
 
-#[derive(Clone, Copy)] enum X86Scratch { Rax, Rcx }
+#[derive(Clone, Copy)] enum X86Scratch { Rax, Rcx, Rdx }
 
 pub struct ExecutableCode { mapping: Mmap, entry: GuestFn }
 
