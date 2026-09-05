@@ -43,6 +43,15 @@ impl GuestMemory {
     #[inline]
     pub const fn host_address(&self, guest_address: usize) -> usize { self.base + guest_address }
 
+    pub fn write_bytes(&mut self, guest_address: usize, bytes: &[u8]) -> io::Result<()> {
+        let end = guest_address.checked_add(bytes.len()).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "guest address overflow"))?;
+        if end > self.size {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "guest write is outside mapped memory"));
+        }
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), (self.base + guest_address) as *mut u8, bytes.len()); }
+        Ok(())
+    }
+
     #[inline]
     pub fn write_u32(&mut self, guest_address: usize, value: u32) {
         assert!(guest_address.checked_add(4).is_some_and(|end| end <= self.size));
