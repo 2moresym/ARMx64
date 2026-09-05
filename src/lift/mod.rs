@@ -81,7 +81,8 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
     };
 
     let (ir_opcode, flags) = match decoded.opcode {
-        A64Opcode::NOP => (Opcode::Nop, 0),
+        // yaxpeax-arm represents architectural NOP as HINT #0.
+        A64Opcode::HINT if decoded.operands[0] == A64Operand::Imm16(0) => (Opcode::Nop, 0),
         A64Opcode::ADD => (Opcode::Add, 0),
         A64Opcode::ADDS => (Opcode::Add, FLAG_WRITES_NZCV),
         A64Opcode::SUB => (Opcode::Sub, 0),
@@ -90,7 +91,10 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::ANDS => (Opcode::And, FLAG_WRITES_NZCV),
         A64Opcode::ORR => (Opcode::Orr, 0),
         A64Opcode::EOR => (Opcode::Eor, 0),
-        A64Opcode::MOV => (Opcode::Mov, 0),
+        // The decoder exposes MOV aliases as their architectural encodings.
+        // MOVZ is safe to represent as Mov; MOVN remains unsupported until the
+        // IR has an explicit bitwise-invert immediate semantic.
+        A64Opcode::MOVZ => (Opcode::Mov, 0),
         A64Opcode::LSLV | A64Opcode::LSRV | A64Opcode::ASRV | A64Opcode::RORV => {
             (Opcode::Shift, 0)
         }
