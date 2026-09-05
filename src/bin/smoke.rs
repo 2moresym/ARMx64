@@ -23,7 +23,7 @@ fn main() {
     assert_eq!(state.gpr[0], 50);
 
     // W32 write must zero-extend into Xn: mov w0, #0xffff; add w0, w0, #1.
-    let state = run(&[0x5281ff e0, 0x11000400, 0xd503201f]);
+    let state = run(&[0x5281ffe0, 0x11000400, 0xd503201f]);
     println!("ARMx64 smoke: W32->X0={} (expected 65536)", state.gpr[0]);
     assert_eq!(state.gpr[0], 65536);
 
