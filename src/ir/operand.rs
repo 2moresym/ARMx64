@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_pc_is_distinct_from_immediate() {
-        assert_eq!(Operand::guest_pc(0x1234), Operand::GuestPc(0x1234));
+    fn guest_pc_is_absolute() {
+        assert_eq!(Operand::guest_pc(0x1000), Operand::GuestPc(0x1000));
     }
 }
