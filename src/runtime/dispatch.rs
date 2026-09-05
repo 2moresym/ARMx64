@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 
 use crate::codegen::{CodeBuffer, ExecutableCode};
-use crate::ir::Block;
+use crate::ir::{Block, Opcode};
 use crate::lift::lift_block_at;
 use crate::runtime::GuestState;
 
@@ -22,11 +22,10 @@ impl Dispatcher {
     #[inline]
     pub fn new() -> Self { Self::default() }
 
-    /// Compile and install one guest block. Unsupported instructions fail safely.
     pub fn compile_block(&mut self, guest_pc: u64, words: &[u32]) -> Result<usize, String> {
         let mut block = Block::at(guest_pc);
         let consumed = lift_block_at(words, guest_pc, &mut block);
-        if block.insts.iter().any(|inst| matches!(inst.opcode, crate::ir::Opcode::Unsupported)) {
+        if block.insts.iter().any(|inst| matches!(inst.opcode, Opcode::Unsupported)) {
             return Err(format!("unsupported instruction in block at {guest_pc:#x}"));
         }
         let mut buffer = CodeBuffer::new();
@@ -43,28 +42,19 @@ impl Dispatcher {
     pub fn block_count(&self) -> usize { self.blocks.len() }
 
     #[inline]
-    fn tick(&mut self, pc: u64) {
-        self.blocks_executed = self.blocks_executed.wrapping_add(1);
-        if let Some(entry) = self.blocks.get_mut(&pc) {
-            entry.hit_count = entry.hit_count.saturating_add(1);
-        }
-    }
+    pub fn hit_count(&self, guest_pc: u64) -> u32 { self.blocks.get(&guest_pc).map_or(0, |entry| entry.hit_count) }
 
-    /// Run cached blocks until a block is missing, a RET leaves the cache, or the
-    /// execution budget is exhausted. Returns the final guest PC.
+    /// Run cached blocks until a block is missing or the execution budget is exhausted.
     pub fn run(&mut self, state: &mut GuestState, max_blocks: usize) -> Result<u64, String> {
         for _ in 0..max_blocks {
             let pc = state.pc;
-            let entry = self.blocks.get(&pc).ok_or_else(|| format!("no translated block at {pc:#x}"))?;
-            self.tick(pc);
-            unsafe { (entry.code.entry())(state); }
+            let entry = self.blocks.get_mut(&pc).ok_or_else(|| format!("no translated block at {pc:#x}"))?;
+            self.blocks_executed = self.blocks_executed.wrapping_add(1);
+            entry.hit_count = entry.hit_count.saturating_add(1);
+            let entry_fn = entry.code.entry();
+            unsafe { entry_fn(state); }
             if !self.blocks.contains_key(&state.pc) { return Ok(state.pc); }
         }
         Err("dispatcher execution budget exhausted".into())
-    }
-
-    #[inline]
-    pub fn hit_count(&self, guest_pc: u64) -> u32 {
-        self.blocks.get(&guest_pc).map_or(0, |entry| entry.hit_count)
     }
 }
