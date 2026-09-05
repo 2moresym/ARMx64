@@ -5,11 +5,7 @@ use memmap2::{Mmap, MmapMut};
 pub type GuestFn = unsafe extern "C" fn(*mut GuestState);
 
 #[derive(Debug)]
-pub enum CodegenError {
-    UnsupportedOpcode(Opcode),
-    UnsupportedOperand,
-    FlagWritingInstruction,
-}
+pub enum CodegenError { UnsupportedOpcode(Opcode), UnsupportedOperand, FlagWritingInstruction }
 
 #[derive(Debug, Default)]
 pub struct CodeBuffer { pub bytes: Vec<u8> }
@@ -32,7 +28,10 @@ impl CodeBuffer {
     fn store_state(&mut self, guest: GuestReg, reg: X86Scratch) {
         if guest.kind == RegKind::Zero { return; }
         let disp = if guest.kind == RegKind::StackPointer { SP_OFFSET } else { GPR_BASE + guest.num as i32 * 8 };
-        self.mov_store(disp, reg, guest.width);
+        // AArch64 W writes zero-extend into the corresponding X register.
+        // RAX/RCX are already zero-extended by every W32 operation we emit, so
+        // always store the full 64-bit value to keep the architectural state exact.
+        self.mov_store(disp, reg, RegWidth::X64);
     }
 
     fn load_operand(&mut self, op: Operand, reg: X86Scratch, width: RegWidth) -> Result<(), CodegenError> {
@@ -71,10 +70,7 @@ impl CodeBuffer {
     #[inline]
     fn xor(&mut self, dst: X86Scratch, src: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x31);
-        self.emit8(match (dst, src) {
-            (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8,
-            (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9,
-        });
+        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9 });
     }
 
     #[inline]
@@ -88,12 +84,7 @@ impl CodeBuffer {
     fn shift_imm(&mut self, reg: X86Scratch, kind: ShiftKind, amount: u8, width: RegWidth) {
         if amount == 0 { return; }
         self.rex(width == RegWidth::X64); self.emit8(0xC1);
-        let rm = match (reg, kind) {
-            (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8,
-            (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8,
-            (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9,
-            (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9,
-        };
+        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9 };
         self.emit8(rm); self.emit8(amount);
     }
 
@@ -120,10 +111,7 @@ impl CodeBuffer {
                 Opcode::Shift => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
                     self.load_operand(inst.b, X86Scratch::Rax, dest.width)?;
-                    match inst.c {
-                        Operand::ShiftReg { amount, kind, .. } => { self.load_state(X86Scratch::Rcx, amount); self.shift_reg(kind, dest.width); }
-                        _ => return Err(CodegenError::UnsupportedOperand),
-                    }
+                    match inst.c { Operand::ShiftReg { amount, kind, .. } => { self.load_state(X86Scratch::Rcx, amount); self.shift_reg(kind, dest.width); }, _ => return Err(CodegenError::UnsupportedOperand) }
                     self.store_state(dest, X86Scratch::Rax);
                 }
                 _ => return Err(CodegenError::UnsupportedOpcode(inst.opcode)),
