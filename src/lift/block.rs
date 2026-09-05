@@ -19,6 +19,13 @@ pub fn lift_block(words: &[u32], block: &mut Block) -> usize {
     consumed
 }
 
+/// Start a new basic block with explicit guest PC metadata and lift into it.
+#[inline]
+pub fn lift_block_at(words: &[u32], guest_pc: u64, block: &mut Block) -> usize {
+    block.guest_pc = guest_pc;
+    lift_block(words, block)
+}
+
 #[inline]
 fn matches_terminal(opcode: &yaxpeax_arm::armv8::a64::Opcode) -> bool {
     use yaxpeax_arm::armv8::a64::Opcode::*;
@@ -31,11 +38,12 @@ mod tests {
     use crate::ir::Opcode;
 
     #[test]
-    fn block_stops_after_branch() {
+    fn block_preserves_pc_and_stops_after_branch() {
         let mut block = Block::new();
-        let consumed = lift_block(&[0xd503201f, 0x14000000, 0xd503201f], &mut block);
+        let consumed = lift_block_at(&[0xd503201f, 0x14000000, 0xd503201f], 0x1000, &mut block);
         assert_eq!(consumed, 2);
-        assert_eq!(block.insts.len(), 2);
+        assert_eq!(block.guest_pc, 0x1000);
+        assert_eq!(block.byte_len(), 8);
         assert_eq!(block.insts[0].opcode, Opcode::Nop);
         assert_eq!(block.insts[1].opcode, Opcode::Branch);
     }
