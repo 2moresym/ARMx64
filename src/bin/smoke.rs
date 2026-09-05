@@ -55,7 +55,7 @@ fn main() {
     // Block 0x1000: mov x0,#40; b 0x100c.
     // Block 0x100c: add x0,x0,#2; ret.
     let mut dispatcher = Dispatcher::new();
-    let first = [0xd2800500, 0x14000003];
+    let first = [0xd2800500, 0x14000002];
     let second = [0x91000800, 0xd65f03c0];
     assert_eq!(dispatcher.compile_block(0x1000, &first).unwrap(), 2);
     assert_eq!(dispatcher.compile_block(0x100c, &second).unwrap(), 2);
