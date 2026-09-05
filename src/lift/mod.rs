@@ -29,7 +29,6 @@ fn lower_shift(style: ShiftStyle) -> Option<ShiftKind> {
     }
 }
 
-/// Convert a decoder operand into ARMx64's typed operand.
 #[inline]
 fn lower_operand(op: A64Operand) -> Operand {
     match op {
@@ -54,13 +53,15 @@ fn lower_operand(op: A64Operand) -> Operand {
 
 #[inline]
 fn unsupported(inst: A64Inst, block: &mut Block) {
-    block.push(IRInst {
-        opcode: Opcode::Unsupported,
-        flags: 0,
-        a: Operand::raw_inst(inst.0),
-        b: Operand::None,
-        c: Operand::None,
-    });
+    block.push(IRInst { opcode: Opcode::Unsupported, flags: 0, a: Operand::raw_inst(inst.0), b: Operand::None, c: Operand::None });
+}
+
+#[inline]
+fn variable_shift_operands(decoded: &yaxpeax_arm::armv8::a64::Instruction, kind: ShiftKind) -> Option<(Operand, Operand, Operand)> {
+    let dest = match lower_operand(decoded.operands[0]) { Operand::Reg(r) => Operand::Reg(r), _ => return None };
+    let value = match lower_operand(decoded.operands[1]) { Operand::Reg(r) => r, _ => return None };
+    let amount = match lower_operand(decoded.operands[2]) { Operand::Reg(r) => r, _ => return None };
+    Some((dest, Operand::Reg(value), Operand::ShiftReg { value, amount, kind }))
 }
 
 /// Lift one decoded guest instruction into ARMx64 IR.
@@ -70,6 +71,22 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         Ok(d) => d,
         Err(_) => { unsupported(inst, block); return; }
     };
+
+    let variable_shift = match decoded.opcode {
+        A64Opcode::LSLV => Some(ShiftKind::Lsl),
+        A64Opcode::LSRV => Some(ShiftKind::Lsr),
+        A64Opcode::ASRV => Some(ShiftKind::Asr),
+        A64Opcode::RORV => Some(ShiftKind::Ror),
+        _ => None,
+    };
+    if let Some(kind) = variable_shift {
+        if let Some((a, b, c)) = variable_shift_operands(&decoded, kind) {
+            block.push(IRInst { opcode: Opcode::Shift, flags: 0, a, b, c });
+        } else {
+            unsupported(inst, block);
+        }
+        return;
+    }
 
     let (ir_opcode, flags) = match decoded.opcode {
         A64Opcode::HINT if decoded.operands[0] == A64Operand::Imm16(0) => (Opcode::Nop, 0),
@@ -82,7 +99,6 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::ORR => (Opcode::Orr, 0),
         A64Opcode::EOR => (Opcode::Eor, 0),
         A64Opcode::MOVZ => (Opcode::Mov, 0),
-        A64Opcode::LSLV | A64Opcode::LSRV | A64Opcode::ASRV | A64Opcode::RORV => (Opcode::Shift, 0),
         A64Opcode::B | A64Opcode::BR => (Opcode::Branch, 0),
         A64Opcode::Bcc(_) | A64Opcode::CBZ | A64Opcode::CBNZ => (Opcode::BranchCond, 0),
         A64Opcode::BL | A64Opcode::BLR => (Opcode::Call, 0),
