@@ -6,7 +6,7 @@ use crate::ir::{
 };
 use yaxpeax_arm::armv8::a64::{Opcode as A64Opcode, Operand as A64Operand, ShiftStyle, SizeCode};
 
-pub use block::lift_block;
+pub use block::{lift_block, lift_block_at};
 
 #[inline]
 fn lower_reg(size: SizeCode, num: u16, sp: bool) -> Operand {
@@ -19,11 +19,8 @@ fn lower_reg(size: SizeCode, num: u16, sp: bool) -> Operand {
 #[inline]
 fn lower_shift(style: ShiftStyle) -> Option<ShiftKind> {
     match style {
-        ShiftStyle::LSL => Some(ShiftKind::Lsl),
-        ShiftStyle::LSR => Some(ShiftKind::Lsr),
-        ShiftStyle::ASR => Some(ShiftKind::Asr),
-        ShiftStyle::ROR => Some(ShiftKind::Ror),
-        _ => None,
+        ShiftStyle::LSL => Some(ShiftKind::Lsl), ShiftStyle::LSR => Some(ShiftKind::Lsr),
+        ShiftStyle::ASR => Some(ShiftKind::Asr), ShiftStyle::ROR => Some(ShiftKind::Ror), _ => None,
     }
 }
 
@@ -39,10 +36,7 @@ fn lower_operand(op: A64Operand) -> Operand {
         A64Operand::PCOffset(offset) => Operand::PCRelative(offset),
         A64Operand::ImmShift(value, amount) => Operand::ShiftedImm { value, amount },
         A64Operand::RegShift(style, amount, size, num) => match lower_shift(style) {
-            Some(kind) => match lower_reg(size, num, false) {
-                Operand::Reg(reg) => Operand::ShiftedReg { reg, kind, amount },
-                _ => Operand::None,
-            },
+            Some(kind) => match lower_reg(size, num, false) { Operand::Reg(reg) => Operand::ShiftedReg { reg, kind, amount }, _ => Operand::None },
             None => Operand::None,
         },
         _ => Operand::None,
@@ -56,13 +50,8 @@ fn lower_unsigned_mem(inst: A64Inst, load: bool) -> Option<(Operand, Operand)> {
     let is_load = class == 0x3940_0000;
     let is_store = class == 0x3900_0000;
     if (load && !is_load) || (!load && !is_store) { return None; }
-
     let size = ((word >> 30) & 0x3) as u8;
-    let width = match size {
-        2 => RegWidth::W32,
-        3 => RegWidth::X64,
-        _ => return None,
-    };
+    let width = match size { 2 => RegWidth::W32, 3 => RegWidth::X64, _ => return None };
     let rt = (word & 0x1f) as u8;
     let rn = ((word >> 5) & 0x1f) as u8;
     let imm12 = ((word >> 10) & 0xfff) as i32;
@@ -88,67 +77,30 @@ fn variable_shift_operands(decoded: &yaxpeax_arm::armv8::a64::Instruction, kind:
 
 #[inline]
 pub fn lift_one(inst: A64Inst, block: &mut Block) {
-    if let Some((a, b)) = lower_unsigned_mem(inst, true) {
-        block.push(IRInst { opcode: Opcode::Load, flags: 0, a, b, c: Operand::None });
-        return;
-    }
-    if let Some((a, b)) = lower_unsigned_mem(inst, false) {
-        block.push(IRInst { opcode: Opcode::Store, flags: 0, a, b, c: Operand::None });
-        return;
-    }
-
+    if let Some((a, b)) = lower_unsigned_mem(inst, true) { block.push(IRInst { opcode: Opcode::Load, flags: 0, a, b, c: Operand::None }); return; }
+    if let Some((a, b)) = lower_unsigned_mem(inst, false) { block.push(IRInst { opcode: Opcode::Store, flags: 0, a, b, c: Operand::None }); return; }
     let decoded = match aarch64::decode(inst) { Ok(d) => d, Err(_) => { unsupported(inst, block); return; } };
-
-    let variable_shift = match decoded.opcode {
-        A64Opcode::LSLV => Some(ShiftKind::Lsl),
-        A64Opcode::LSRV => Some(ShiftKind::Lsr),
-        A64Opcode::ASRV => Some(ShiftKind::Asr),
-        A64Opcode::RORV => Some(ShiftKind::Ror),
-        _ => None,
-    };
+    let variable_shift = match decoded.opcode { A64Opcode::LSLV => Some(ShiftKind::Lsl), A64Opcode::LSRV => Some(ShiftKind::Lsr), A64Opcode::ASRV => Some(ShiftKind::Asr), A64Opcode::RORV => Some(ShiftKind::Ror), _ => None };
     if let Some(kind) = variable_shift {
-        if let Some((a, b, c)) = variable_shift_operands(&decoded, kind) {
-            block.push(IRInst { opcode: Opcode::Shift, flags: 0, a, b, c });
-        } else { unsupported(inst, block); }
+        if let Some((a, b, c)) = variable_shift_operands(&decoded, kind) { block.push(IRInst { opcode: Opcode::Shift, flags: 0, a, b, c }); } else { unsupported(inst, block); }
         return;
     }
-
     let (ir_opcode, flags) = match decoded.opcode {
         A64Opcode::HINT if inst.0 == 0xd503_201f => (Opcode::Nop, 0),
-        A64Opcode::ADD => (Opcode::Add, 0),
-        A64Opcode::ADDS => (Opcode::Add, FLAG_WRITES_NZCV),
-        A64Opcode::SUB => (Opcode::Sub, 0),
-        A64Opcode::SUBS => (Opcode::Sub, FLAG_WRITES_NZCV),
-        A64Opcode::AND => (Opcode::And, 0),
-        A64Opcode::ANDS => (Opcode::And, FLAG_WRITES_NZCV),
-        A64Opcode::ORR => (Opcode::Orr, 0),
-        A64Opcode::EOR => (Opcode::Eor, 0),
-        A64Opcode::MOVZ => (Opcode::Mov, 0),
-        A64Opcode::B | A64Opcode::BR => (Opcode::Branch, 0),
-        A64Opcode::Bcc(_) | A64Opcode::CBZ | A64Opcode::CBNZ => (Opcode::BranchCond, 0),
-        A64Opcode::BL | A64Opcode::BLR => (Opcode::Call, 0),
+        A64Opcode::ADD => (Opcode::Add, 0), A64Opcode::ADDS => (Opcode::Add, FLAG_WRITES_NZCV),
+        A64Opcode::SUB => (Opcode::Sub, 0), A64Opcode::SUBS => (Opcode::Sub, FLAG_WRITES_NZCV),
+        A64Opcode::AND => (Opcode::And, 0), A64Opcode::ANDS => (Opcode::And, FLAG_WRITES_NZCV),
+        A64Opcode::ORR => (Opcode::Orr, 0), A64Opcode::EOR => (Opcode::Eor, 0), A64Opcode::MOVZ => (Opcode::Mov, 0),
+        A64Opcode::B => (Opcode::Branch, 0),
         A64Opcode::RET => (Opcode::Ret, 0),
         _ => { unsupported(inst, block); return; }
     };
-
     block.push(IRInst { opcode: ir_opcode, flags, a: lower_operand(decoded.operands[0]), b: lower_operand(decoded.operands[1]), c: lower_operand(decoded.operands[2]) });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sp_is_only_register_31() {
-        let mut block = Block::new();
-        lift_one(A64Inst(0x91002000), &mut block);
-        match block.insts[0].a { Operand::Reg(r) => assert_eq!(r.kind, RegKind::General), _ => panic!() }
-    }
-
-    #[test]
-    fn nop_encoding_is_recognized() {
-        let mut block = Block::new();
-        lift_one(A64Inst(0xd503_201f), &mut block);
-        assert_eq!(block.insts[0].opcode, Opcode::Nop);
-    }
+    #[test] fn sp_is_only_register_31() { let mut block = Block::new(); lift_one(A64Inst(0x91002000), &mut block); match block.insts[0].a { Operand::Reg(r) => assert_eq!(r.kind, RegKind::General), _ => panic!() } }
+    #[test] fn nop_encoding_is_recognized() { let mut block = Block::new(); lift_one(A64Inst(0xd503_201f), &mut block); assert_eq!(block.insts[0].opcode, Opcode::Nop); }
 }
