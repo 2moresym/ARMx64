@@ -1,5 +1,6 @@
 pub mod arch;
 pub mod codegen;
+pub mod elf;
 pub mod ir;
 pub mod jit;
 pub mod lift;
