@@ -22,11 +22,11 @@ fn main() {
     println!("ARMx64 smoke: X0={} (expected 50)", state.gpr[0]);
     assert_eq!(state.gpr[0], 50);
 
-    // W32 path: mov w0, #0xfff; add w0, w0, #1.
-    // A W-register write must leave the architectural X register zero-extended.
-    let state = run(&[0x5281ffe0, 0x11000400, 0xd503201f]);
-    println!("ARMx64 smoke: W32->X0={} (expected 4096)", state.gpr[0]);
-    assert_eq!(state.gpr[0], 4096);
+    // W32 path: mov w0, #0xffff; add w0, w0, #1.
+    // A W-register write must zero-extend into the corresponding X register.
+    let state = run(&[0x529fffe0, 0x11000400, 0xd503201f]);
+    println!("ARMx64 smoke: W32->X0={} (expected 65536)", state.gpr[0]);
+    assert_eq!(state.gpr[0], 65536);
 
     // Reading XZR must produce zero: add x0, xzr, #7.
     let state = run(&[0x91001fe0, 0xd503201f]);
