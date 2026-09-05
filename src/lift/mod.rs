@@ -76,7 +76,10 @@ fn variable_shift_operands(decoded: &yaxpeax_arm::armv8::a64::Instruction, kind:
 }
 
 #[inline]
-pub fn lift_one(inst: A64Inst, block: &mut Block) {
+pub fn lift_one(inst: A64Inst, block: &mut Block) { lift_one_at(inst, block.guest_pc + (block.insts.len() as u64 * 4), block) }
+
+#[inline]
+pub fn lift_one_at(inst: A64Inst, guest_pc: u64, block: &mut Block) {
     if let Some((a, b)) = lower_unsigned_mem(inst, true) { block.push(IRInst { opcode: Opcode::Load, flags: 0, a, b, c: Operand::None }); return; }
     if let Some((a, b)) = lower_unsigned_mem(inst, false) { block.push(IRInst { opcode: Opcode::Store, flags: 0, a, b, c: Operand::None }); return; }
     let decoded = match aarch64::decode(inst) { Ok(d) => d, Err(_) => { unsupported(inst, block); return; } };
@@ -91,11 +94,14 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::SUB => (Opcode::Sub, 0), A64Opcode::SUBS => (Opcode::Sub, FLAG_WRITES_NZCV),
         A64Opcode::AND => (Opcode::And, 0), A64Opcode::ANDS => (Opcode::And, FLAG_WRITES_NZCV),
         A64Opcode::ORR => (Opcode::Orr, 0), A64Opcode::EOR => (Opcode::Eor, 0), A64Opcode::MOVZ => (Opcode::Mov, 0),
-        A64Opcode::B => (Opcode::Branch, 0),
-        A64Opcode::RET => (Opcode::Ret, 0),
+        A64Opcode::B => (Opcode::Branch, 0), A64Opcode::RET => (Opcode::Ret, 0),
         _ => { unsupported(inst, block); return; }
     };
-    block.push(IRInst { opcode: ir_opcode, flags, a: lower_operand(decoded.operands[0]), b: lower_operand(decoded.operands[1]), c: lower_operand(decoded.operands[2]) });
+    let mut a = lower_operand(decoded.operands[0]);
+    if ir_opcode == Opcode::Branch {
+        a = match a { Operand::PCRelative(offset) => Operand::GuestPc(((guest_pc as i64) + offset) as u64), _ => { unsupported(inst, block); return; } };
+    }
+    block.push(IRInst { opcode: ir_opcode, flags, a, b: lower_operand(decoded.operands[1]), c: lower_operand(decoded.operands[2]) });
 }
 
 #[cfg(test)]
@@ -103,4 +109,5 @@ mod tests {
     use super::*;
     #[test] fn sp_is_only_register_31() { let mut block = Block::new(); lift_one(A64Inst(0x91002000), &mut block); match block.insts[0].a { Operand::Reg(r) => assert_eq!(r.kind, RegKind::General), _ => panic!() } }
     #[test] fn nop_encoding_is_recognized() { let mut block = Block::new(); lift_one(A64Inst(0xd503_201f), &mut block); assert_eq!(block.insts[0].opcode, Opcode::Nop); }
+    #[test] fn direct_branch_target_is_absolute_guest_pc() { let mut block = Block::at(0x1000); lift_one_at(A64Inst(0x14000000), 0x1000, &mut block); assert_eq!(block.insts[0].a, Operand::GuestPc(0x1000)); }
 }
