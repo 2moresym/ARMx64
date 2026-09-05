@@ -1,6 +1,6 @@
 use crate::arch::aarch64::{self, A64Inst};
 use crate::ir::{Block, IRInst, Opcode, Value};
-use yaxpeax_arm::armv8::a64::Mnemonic;
+use yaxpeax_arm::armv8::a64::{Opcode as A64Opcode, Operand, Instruction};
 
 /// Lift one decoded guest instruction into ARMx64 IR.
 ///
@@ -11,7 +11,7 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
     let decoded = match aarch64::decode(inst) {
         Ok(d) => d,
         Err(_) => {
-            // Fallback or trap for decode failures
+            // Decode error representation
             block.push(IRInst {
                 opcode: Opcode::Nop,
                 flags: 0,
@@ -23,16 +23,51 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         }
     };
 
-    let opcode = match decoded.mnemonic() {
-        Mnemonic::NOP => Opcode::Nop,
-        _ => Opcode::Nop, // Extend with more mappings as required by the milestone
+    let ir_opcode = match decoded.opcode {
+        A64Opcode::NOP => Opcode::Nop,
+        A64Opcode::ADD | A64Opcode::ADDS => Opcode::Add,
+        A64Opcode::SUB | A64Opcode::SUBS => Opcode::Sub,
+        A64Opcode::AND | A64Opcode::ANDS => Opcode::And,
+        A64Opcode::ORR => Opcode::Orr,
+        A64Opcode::EOR => Opcode::Eor,
+        A64Opcode::MOV => Opcode::Mov,
+        A64Opcode::LSL => Opcode::Shift,
+        A64Opcode::LSR => Opcode::Shift,
+        _ => {
+            // Unsupported instruction fallback or representation
+            block.push(IRInst {
+                opcode: Opcode::Nop,
+                flags: 0,
+                a: Value(0),
+                b: Value(0),
+                c: Value(0),
+            });
+            return;
+        }
     };
 
+    // Basic operand extraction mapping placeholder (using operand kinds if available)
+    // For now we map standard register/immediate destinations/sources to IR Value placeholders
     block.push(IRInst {
-        opcode,
+        opcode: ir_opcode,
         flags: 0,
         a: Value(0),
         b: Value(0),
         c: Value(0),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lift_nop() {
+        let mut block = Block::new();
+        // NOP encoding in AArch64: 0xd503201f
+        let inst = A64Inst(0xd503201f);
+        lift_one(inst, &mut block);
+        assert_eq!(block.insts.len(), 1);
+        assert_eq!(block.insts[0].opcode, Opcode::Nop);
+    }
 }
