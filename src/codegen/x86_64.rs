@@ -1,5 +1,5 @@
 use crate::ir::{Block, GuestReg, Opcode, Operand, RegKind, RegWidth, ShiftKind};
-use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, SP_OFFSET};
+use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, PC_OFFSET, SP_OFFSET};
 use memmap2::{Mmap, MmapMut};
 
 pub type GuestFn = unsafe extern "C" fn(*mut GuestState);
@@ -74,23 +74,20 @@ impl CodeBuffer {
 
     #[inline]
     fn binop(&mut self, op: Opcode, width: RegWidth) {
-        self.rex(width == RegWidth::X64);
-        self.emit8(match op { Opcode::Add => 0x01, Opcode::Sub => 0x29, Opcode::And => 0x21, Opcode::Orr => 0x09, Opcode::Eor => 0x31, _ => unreachable!() });
-        self.emit8(0xC8);
+        self.rex(width == RegWidth::X64); self.emit8(match op { Opcode::Add => 0x01, Opcode::Sub => 0x29, Opcode::And => 0x21, Opcode::Orr => 0x09, Opcode::Eor => 0x31, _ => unreachable!() }); self.emit8(0xC8);
     }
 
     #[inline]
     fn shift_imm(&mut self, reg: X86Scratch, kind: ShiftKind, amount: u8, width: RegWidth) {
         if amount == 0 { return; }
         self.rex(width == RegWidth::X64); self.emit8(0xC1);
-        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9, _ => unreachable!() };
+        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9, (X86Scratch::Rdx, ShiftKind::Lsl) => 0xE2, (X86Scratch::Rdx, ShiftKind::Lsr) => 0xEA, (X86Scratch::Rdx, ShiftKind::Asr) => 0xFA, (X86Scratch::Rdx, ShiftKind::Ror) => 0xCA };
         self.emit8(rm); self.emit8(amount);
     }
 
     #[inline]
     fn shift_reg(&mut self, kind: ShiftKind, width: RegWidth) {
-        self.rex(width == RegWidth::X64); self.emit8(0xD3);
-        self.emit8(match kind { ShiftKind::Lsl => 0xE0, ShiftKind::Lsr => 0xE8, ShiftKind::Asr => 0xF8, ShiftKind::Ror => 0xC8 });
+        self.rex(width == RegWidth::X64); self.emit8(0xD3); self.emit8(match kind { ShiftKind::Lsl => 0xE0, ShiftKind::Lsr => 0xE8, ShiftKind::Asr => 0xF8, ShiftKind::Ror => 0xC8 });
     }
 
     #[inline]
@@ -110,6 +107,12 @@ impl CodeBuffer {
         self.rex(width == RegWidth::X64); self.emit8(0x89); self.emit8(0x88); self.emit32(offset as u32);
     }
 
+    #[inline]
+    fn emit_set_pc_imm(&mut self, pc: u64) {
+        self.mov_imm(X86Scratch::Rax, pc, RegWidth::X64);
+        self.mov_store(PC_OFFSET, X86Scratch::Rax, RegWidth::X64);
+    }
+
     pub fn emit_block(&mut self, block: &Block) -> Result<(), CodegenError> {
         for inst in &block.insts {
             if inst.flags != 0 { return Err(CodegenError::FlagWritingInstruction); }
@@ -121,8 +124,7 @@ impl CodeBuffer {
                 }
                 Opcode::Add | Opcode::Sub | Opcode::And | Opcode::Orr | Opcode::Eor => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
-                    self.load_operand(inst.b, X86Scratch::Rax, dest.width)?; self.load_operand(inst.c, X86Scratch::Rcx, dest.width)?;
-                    self.binop(inst.opcode, dest.width); self.store_state(dest, X86Scratch::Rax);
+                    self.load_operand(inst.b, X86Scratch::Rax, dest.width)?; self.load_operand(inst.c, X86Scratch::Rcx, dest.width)?; self.binop(inst.opcode, dest.width); self.store_state(dest, X86Scratch::Rax);
                 }
                 Opcode::Shift => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
@@ -140,6 +142,8 @@ impl CodeBuffer {
                     let src = match inst.b { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
                     self.load_state(X86Scratch::Rcx, src); self.emit_guest_address(mem.base); self.emit_mem_store(mem.width, mem.offset);
                 }
+                Opcode::Branch => match inst.a { Operand::GuestPc(pc) => { self.emit_set_pc_imm(pc); self.emit8(0xC3); return Ok(()); }, _ => return Err(CodegenError::UnsupportedOperand) },
+                Opcode::Ret => { self.load_state(X86Scratch::Rax, GuestReg::x(30)); self.mov_store(PC_OFFSET, X86Scratch::Rax, RegWidth::X64); self.emit8(0xC3); return Ok(()); }
                 _ => return Err(CodegenError::UnsupportedOpcode(inst.opcode)),
             }
         }
