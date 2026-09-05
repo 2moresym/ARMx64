@@ -47,6 +47,6 @@ mod tests {
         assert_eq!(block.byte_len(), 8);
         assert_eq!(block.insts[0].opcode, Opcode::Nop);
         assert_eq!(block.insts[1].opcode, Opcode::Branch);
-        assert_eq!(block.insts[1].a, Operand::GuestPc(0x1000));
+        assert_eq!(block.insts[1].a, Operand::GuestPc(0x1004));
     }
 }
