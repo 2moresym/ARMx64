@@ -91,7 +91,9 @@ pub fn lift_one(inst: A64Inst, block: &mut Block) {
         A64Opcode::ORR => (Opcode::Orr, 0),
         A64Opcode::EOR => (Opcode::Eor, 0),
         A64Opcode::MOV => (Opcode::Mov, 0),
-        A64Opcode::LSL | A64Opcode::LSR => (Opcode::Shift, 0),
+        A64Opcode::LSLV | A64Opcode::LSRV | A64Opcode::ASRV | A64Opcode::RORV => {
+            (Opcode::Shift, 0)
+        }
         _ => {
             block.push(IRInst {
                 opcode: Opcode::Unsupported,
