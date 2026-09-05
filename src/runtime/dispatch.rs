@@ -5,13 +5,11 @@ use crate::ir::{Block, Opcode};
 use crate::lift::lift_block_at;
 use crate::runtime::GuestState;
 
-/// A block cache entry owns the executable mapping for its guest PC.
 pub struct CompiledBlock {
     pub code: ExecutableCode,
     pub hit_count: u32,
 }
 
-/// Block-first JIT dispatcher. Native blocks return here after updating guest PC.
 #[derive(Default)]
 pub struct Dispatcher {
     blocks: HashMap<u64, CompiledBlock>,
@@ -44,14 +42,15 @@ impl Dispatcher {
     #[inline]
     pub fn hit_count(&self, guest_pc: u64) -> u32 { self.blocks.get(&guest_pc).map_or(0, |entry| entry.hit_count) }
 
-    /// Run cached blocks until a block is missing or the execution budget is exhausted.
     pub fn run(&mut self, state: &mut GuestState, max_blocks: usize) -> Result<u64, String> {
         for _ in 0..max_blocks {
             let pc = state.pc;
-            let entry = self.blocks.get_mut(&pc).ok_or_else(|| format!("no translated block at {pc:#x}"))?;
-            self.blocks_executed = self.blocks_executed.wrapping_add(1);
-            entry.hit_count = entry.hit_count.saturating_add(1);
-            let entry_fn = entry.code.entry();
+            let entry_fn = {
+                let entry = self.blocks.get_mut(&pc).ok_or_else(|| format!("no translated block at {pc:#x}"))?;
+                self.blocks_executed = self.blocks_executed.wrapping_add(1);
+                entry.hit_count = entry.hit_count.saturating_add(1);
+                entry.code.entry()
+            };
             unsafe { entry_fn(state); }
             if !self.blocks.contains_key(&state.pc) { return Ok(state.pc); }
         }
