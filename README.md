@@ -17,6 +17,4 @@ Trace compilation, lazy NZCV flag evaluation, register allocation, and direct ma
 
 ## License
 
-Licensed under either of:
-- MIT License (`LICENSE-MIT` or http://opensource.org/licenses/MIT)
-- Apache License, Version 2.0 (`LICENSE-APACHE` or http://www.apache.org/licenses/LICENSE-2.0)
+Licensed under the GNU General Public License v3.0 or later (`LICENSE` or https://www.gnu.org/licenses/gpl-3.0.html).

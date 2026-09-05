@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A high-performance AArch64 to x86-64 dynamic translation engine"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/2moresym/ARMx64"
 
 [dependencies]
