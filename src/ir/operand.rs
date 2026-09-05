@@ -45,6 +45,15 @@ impl GuestReg {
     }
 }
 
+/// A shift attached to a register operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftKind {
+    Lsl,
+    Lsr,
+    Asr,
+    Ror,
+}
+
 /// An operand carried by ARMx64 IR.
 ///
 /// Guest registers remain explicit until SSA construction. This prevents the
@@ -55,9 +64,10 @@ pub enum Operand {
     Value(Value),
     Reg(GuestReg),
     Imm(u64),
+    ShiftedImm { value: u16, amount: u8 },
     PCRelative(i64),
     RawInst(u32),
-    ShiftedReg { reg: GuestReg, amount: u8 },
+    ShiftedReg { reg: GuestReg, kind: ShiftKind, amount: u8 },
 }
 
 impl Operand {
