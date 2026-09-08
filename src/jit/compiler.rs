@@ -34,7 +34,10 @@ impl BackgroundCompiler {
 
     #[inline]
     pub fn enqueue(&self, request: CompileRequest) -> Result<(), mpsc::SendError<CompileRequest>> {
-        self.tx.as_ref().expect("compiler is shutting down").send(request)
+        match self.tx.as_ref() {
+            Some(tx) => tx.send(request),
+            None => Err(mpsc::SendError(request)),
+        }
     }
 }
 
