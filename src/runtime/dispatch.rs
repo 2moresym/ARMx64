@@ -2,6 +2,7 @@ use hashbrown::HashMap;
 
 use crate::codegen::{CodeBuffer, ExecutableCode};
 use crate::ir::{Block, Opcode};
+use crate::jit::Optimizer;
 use crate::lift::lift_block_at;
 use crate::runtime::GuestState;
 
@@ -26,6 +27,13 @@ impl Dispatcher {
         if block.insts.iter().any(|inst| matches!(inst.opcode, Opcode::Unsupported)) {
             return Err(format!("unsupported instruction in block at {guest_pc:#x}"));
         }
+
+        // Tier-1 compilation already performs cheap, local specialization.
+        // This keeps the execution path small while eliminating redundant
+        // constant moves/arithmetic before machine-code emission.
+        let mut optimizer = Optimizer::default();
+        optimizer.optimize_block(&mut block);
+
         let mut buffer = CodeBuffer::new();
         buffer.emit_block(&block).map_err(|e| format!("codegen failed at {guest_pc:#x}: {e:?}"))?;
         let code = buffer.into_executable().map_err(|e| format!("executable mapping failed: {e}"))?;
