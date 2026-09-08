@@ -78,7 +78,7 @@ fn variable_shift_operands(decoded: &yaxpeax_arm::armv8::a64::Instruction, kind:
 #[inline]
 fn sign_extend_19(value: u32) -> i64 {
     let value = ((value & 0x7ffff) as i64) << 2;
-    (value << 41) >> 41
+    (value << 43) >> 43
 }
 
 #[inline]
@@ -169,6 +169,12 @@ mod tests {
         assert_eq!(block.insts[0].opcode, Opcode::BranchCond);
         assert_eq!(block.insts[0].a, Operand::GuestPc(0x1008));
         assert_eq!(block.insts[0].b, Operand::Imm(1));
+    }
+    #[test] fn conditional_branch_negative_displacement() {
+        let mut block = Block::at(0x2000);
+        // b.ne -4 (imm19 = 0x7ffff)
+        lift_one_at(A64Inst(0x54ffffe1), 0x2000, &mut block);
+        assert_eq!(block.insts[0].a, Operand::GuestPc(0x1ffc));
     }
     #[test] fn cbz_lifts_register_and_target() {
         let mut block = Block::at(0x2000);
