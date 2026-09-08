@@ -1,11 +1,11 @@
 use crate::ir::{Block, GuestReg, Opcode, Operand, RegKind, RegWidth, ShiftKind};
-use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, PC_OFFSET, SP_OFFSET};
+use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, NZCV_OFFSET, PC_OFFSET, SP_OFFSET};
 use memmap2::{Mmap, MmapMut};
 
 pub type GuestFn = unsafe extern "C" fn(*mut GuestState);
 
 #[derive(Debug)]
-pub enum CodegenError { UnsupportedOpcode(Opcode), UnsupportedOperand, FlagWritingInstruction }
+pub enum CodegenError { UnsupportedOpcode(Opcode), UnsupportedOperand }
 
 #[derive(Debug, Default)]
 pub struct CodeBuffer { pub bytes: Vec<u8> }
@@ -69,12 +69,29 @@ impl CodeBuffer {
     #[inline]
     fn xor(&mut self, dst: X86Scratch, src: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x31);
-        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9, _ => unreachable!() });
+        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9, (X86Scratch::Rdx, X86Scratch::Rdx) => 0xD2, _ => unreachable!() });
     }
 
     #[inline]
     fn binop(&mut self, op: Opcode, width: RegWidth) {
-        self.rex(width == RegWidth::X64); self.emit8(match op { Opcode::Add => 0x01, Opcode::Sub => 0x29, Opcode::And => 0x21, Opcode::Orr => 0x09, Opcode::Eor => 0x31, _ => unreachable!() }); self.emit8(0xC8);
+        self.rex(width == RegWidth::X64); self.emit8(match op { Opcode::Add => 0x01, Opcode::Sub => 0x29, Opcode::And | Opcode::Orr => 0x21, Opcode::Eor => 0x31, _ => unreachable!() });
+        if matches!(op, Opcode::Orr) { self.emit8(0xC8); return; }
+        self.emit8(0xC8);
+    }
+
+    #[inline]
+    fn emit_nzcv_from_x86_flags(&mut self) {
+        self.xor(X86Scratch::Rdx, X86Scratch::Rdx, RegWidth::W32);
+        // Build N:Z:C:V in bits 31..28 without disturbing the arithmetic flags.
+        self.emit8(0x0F); self.emit8(0x99); self.emit8(0xC2); // setns dl
+        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01); // shl edx, 1
+        self.emit8(0x0F); self.emit8(0x94); self.emit8(0xC2); // sete dl
+        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01);
+        self.emit8(0x0F); self.emit8(0x92); self.emit8(0xC2); // setb dl
+        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01);
+        self.emit8(0x0F); self.emit8(0x90); self.emit8(0xC2); // seto dl
+        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x1C); // shl edx, 28
+        self.mov_store(NZCV_OFFSET, X86Scratch::Rdx, RegWidth::W32);
     }
 
     #[inline]
@@ -113,9 +130,37 @@ impl CodeBuffer {
         self.mov_store(PC_OFFSET, X86Scratch::Rax, RegWidth::X64);
     }
 
+    #[inline]
+    fn emit_branch_cond(&mut self, target: u64, condition: Operand, fallthrough: u64) -> Result<(), CodegenError> {
+        match condition {
+            // B.cond: reduce NZCV to a 4-bit index and test a 16-bit truth table.
+            Operand::Imm(cond) => {
+                if cond > 15 { return Err(CodegenError::UnsupportedOperand); }
+                let tables: [u16; 16] = [0xF0F0, 0xCCCC, 0xFCFC, 0xFF00, 0xAAAA, 0x3333, 0x0F0F, 0x0303, 0xAA55, 0x55AA, 0x0A05, 0xF5FA, 0xFFFF, 0x0000, 0x0C0C, 0xF3F3];
+                self.mov_load(X86Scratch::Rax, NZCV_OFFSET, RegWidth::W32);
+                self.emit8(0xC1); self.emit8(0xE8); self.emit8(0x1C); // shr eax, 28
+                self.mov_imm(X86Scratch::Rcx, tables[cond as usize] as u64, RegWidth::W32);
+                self.emit8(0x66); self.emit8(0x0F); self.emit8(0xA3); self.emit8(0xC1); // bt cx, ax
+                self.emit8(0x73); self.emit8(0x12); // jnc skip taken (18 bytes)
+            }
+            // CBZ/CBNZ: c==0 => CBZ, c==1 => CBNZ.
+            Operand::Reg(reg) => {
+                let cbnz = match condition { _ => return Err(CodegenError::UnsupportedOperand) };
+                let _ = cbnz;
+                self.load_state(X86Scratch::Rax, reg);
+                self.rex(reg.width == RegWidth::X64); self.emit8(0x85); self.emit8(0xC0); // test rax/eax, itself
+                // This form is only selected after the caller validates c.
+            }
+            _ => return Err(CodegenError::UnsupportedOperand),
+        }
+        self.emit_set_pc_imm(target); self.emit8(0xC3);
+        self.emit_set_pc_imm(fallthrough); self.emit8(0xC3);
+        Ok(())
+    }
+
     pub fn emit_block(&mut self, block: &Block) -> Result<(), CodegenError> {
-        for inst in &block.insts {
-            if inst.flags != 0 { return Err(CodegenError::FlagWritingInstruction); }
+        for (index, inst) in block.insts.iter().enumerate() {
+            let is_last = index + 1 == block.insts.len();
             match inst.opcode {
                 Opcode::Nop => self.emit8(0x90),
                 Opcode::Mov => {
@@ -124,7 +169,10 @@ impl CodeBuffer {
                 }
                 Opcode::Add | Opcode::Sub | Opcode::And | Opcode::Orr | Opcode::Eor => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
-                    self.load_operand(inst.b, X86Scratch::Rax, dest.width)?; self.load_operand(inst.c, X86Scratch::Rcx, dest.width)?; self.binop(inst.opcode, dest.width); self.store_state(dest, X86Scratch::Rax);
+                    self.load_operand(inst.b, X86Scratch::Rax, dest.width)?; self.load_operand(inst.c, X86Scratch::Rcx, dest.width); self.load_operand(inst.c, X86Scratch::Rcx, dest.width)?;
+                    self.binop(inst.opcode, dest.width);
+                    if inst.flags != 0 { self.emit_nzcv_from_x86_flags(); }
+                    self.store_state(dest, X86Scratch::Rax);
                 }
                 Opcode::Shift => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
@@ -143,11 +191,33 @@ impl CodeBuffer {
                     self.load_state(X86Scratch::Rcx, src); self.emit_guest_address(mem.base); self.emit_mem_store(mem.width, mem.offset);
                 }
                 Opcode::Branch => match inst.a { Operand::GuestPc(pc) => { self.emit_set_pc_imm(pc); self.emit8(0xC3); return Ok(()); }, _ => return Err(CodegenError::UnsupportedOperand) },
+                Opcode::BranchCond => {
+                    let target = match inst.a { Operand::GuestPc(pc) => pc, _ => return Err(CodegenError::UnsupportedOperand) };
+                    let fallthrough = block.guest_pc + (index as u64 + 1) * 4;
+                    match (inst.b, inst.c) {
+                        (Operand::Imm(cond), Operand::None) => self.emit_branch_cond(target, Operand::Imm(cond), fallthrough)?,
+                        (Operand::Reg(reg), Operand::Imm(kind)) if kind <= 1 => {
+                            self.load_state(X86Scratch::Rax, reg);
+                            self.rex(reg.width == RegWidth::X64); self.emit8(0x85); self.emit8(0xC0);
+                            self.emit8(if kind == 0 { 0x75 } else { 0x74 }); self.emit8(0x12);
+                            self.emit_set_pc_imm(target); self.emit8(0xC3);
+                            self.emit_set_pc_imm(fallthrough); self.emit8(0xC3);
+                        }
+                        _ => return Err(CodegenError::UnsupportedOperand),
+                    }
+                    return Ok(());
+                }
                 Opcode::Ret => { self.load_state(X86Scratch::Rax, GuestReg::x(30)); self.mov_store(PC_OFFSET, X86Scratch::Rax, RegWidth::X64); self.emit8(0xC3); return Ok(()); }
+                Opcode::Compare => return Err(CodegenError::UnsupportedOpcode(inst.opcode)),
                 _ => return Err(CodegenError::UnsupportedOpcode(inst.opcode)),
             }
+            if is_last {
+                self.emit_set_pc_imm(block.guest_pc + block.byte_len());
+                self.emit8(0xC3);
+            }
         }
-        self.emit8(0xC3); Ok(())
+        if block.insts.is_empty() { self.emit_set_pc_imm(block.guest_pc); self.emit8(0xC3); }
+        Ok(())
     }
 
     pub fn into_executable(self) -> Result<ExecutableCode, std::io::Error> { ExecutableCode::from_bytes(&self.bytes) }
