@@ -27,4 +27,5 @@ impl GuestState {
 
 pub const GPR_BASE: i32 = offset_of!(GuestState, gpr) as i32;
 pub const SP_OFFSET: i32 = offset_of!(GuestState, sp) as i32;
+pub const NZCV_OFFSET: i32 = offset_of!(GuestState, nzcv) as i32;
 pub const PC_OFFSET: i32 = offset_of!(GuestState, pc) as i32;
