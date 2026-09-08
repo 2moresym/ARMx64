@@ -1,4 +1,4 @@
-use crate::ir::{Block, GuestReg, Opcode, Operand, RegKind, RegWidth, ShiftKind};
+use crate::ir::{Block, GuestReg, IRInst, Opcode, Operand, RegKind, RegWidth, ShiftKind};
 use crate::runtime::{GuestState, GPR_BASE, HOST_BASE, NZCV_OFFSET, PC_OFFSET, SP_OFFSET};
 use memmap2::{Mmap, MmapMut};
 
@@ -48,28 +48,38 @@ impl CodeBuffer {
             (X86Scratch::Rax, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xB8); self.emit64(value); }
             (X86Scratch::Rcx, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xB9); self.emit64(value); }
             (X86Scratch::Rdx, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xBA); self.emit64(value); }
+            (X86Scratch::Rsi, RegWidth::X64) => { self.emit8(0x48); self.emit8(0xBE); self.emit64(value); }
             (X86Scratch::Rax, RegWidth::W32) => { self.emit8(0xB8); self.emit32(value as u32); }
             (X86Scratch::Rcx, RegWidth::W32) => { self.emit8(0xB9); self.emit32(value as u32); }
             (X86Scratch::Rdx, RegWidth::W32) => { self.emit8(0xBA); self.emit32(value as u32); }
+            (X86Scratch::Rsi, RegWidth::W32) => { self.emit8(0xBE); self.emit32(value as u32); }
         }
     }
 
     #[inline]
     fn mov_load(&mut self, reg: X86Scratch, disp: i32, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x8B);
-        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97 }); self.emit32(disp as u32);
+        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97, X86Scratch::Rsi => 0xB7 }); self.emit32(disp as u32);
     }
 
     #[inline]
     fn mov_store(&mut self, disp: i32, reg: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x89);
-        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97 }); self.emit32(disp as u32);
+        self.emit8(match reg { X86Scratch::Rax => 0x87, X86Scratch::Rcx => 0x8F, X86Scratch::Rdx => 0x97, X86Scratch::Rsi => 0xB7 }); self.emit32(disp as u32);
     }
 
     #[inline]
     fn xor(&mut self, dst: X86Scratch, src: X86Scratch, width: RegWidth) {
         self.rex(width == RegWidth::X64); self.emit8(0x31);
-        self.emit8(match (dst, src) { (X86Scratch::Rax, X86Scratch::Rax) => 0xC0, (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8, (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1, (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9, (X86Scratch::Rdx, X86Scratch::Rdx) => 0xD2, _ => unreachable!() });
+        self.emit8(match (dst, src) {
+            (X86Scratch::Rax, X86Scratch::Rax) => 0xC0,
+            (X86Scratch::Rax, X86Scratch::Rcx) => 0xC8,
+            (X86Scratch::Rcx, X86Scratch::Rax) => 0xC1,
+            (X86Scratch::Rcx, X86Scratch::Rcx) => 0xC9,
+            (X86Scratch::Rdx, X86Scratch::Rdx) => 0xD2,
+            (X86Scratch::Rsi, X86Scratch::Rsi) => 0xF6,
+            _ => unreachable!(),
+        });
     }
 
     #[inline]
@@ -80,16 +90,39 @@ impl CodeBuffer {
     }
 
     #[inline]
-    fn emit_nzcv_from_x86_flags(&mut self) {
-        self.xor(X86Scratch::Rdx, X86Scratch::Rdx, RegWidth::W32);
-        self.emit8(0x0F); self.emit8(0x99); self.emit8(0xC2); // setns dl
-        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01); // shl edx, 1
-        self.emit8(0x0F); self.emit8(0x94); self.emit8(0xC2); // sete dl
-        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01);
-        self.emit8(0x0F); self.emit8(0x92); self.emit8(0xC2); // setb dl
-        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x01);
-        self.emit8(0x0F); self.emit8(0x90); self.emit8(0xC2); // seto dl
-        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x1C); // shl edx, 28
+    fn emit_nzcv_from_x86_flags(&mut self, op: Opcode) {
+        // Capture every flag before executing anything that can modify EFLAGS.
+        // dl=N, cl=Z, al=C, sil=V. setcc itself does not modify EFLAGS.
+        self.emit8(0x0F); self.emit8(0x98); self.emit8(0xC2); // sets dl
+        self.emit8(0x0F); self.emit8(0x94); self.emit8(0xC1); // sete cl
+        match op {
+            Opcode::Add => {
+                self.emit8(0x0F); self.emit8(0x92); self.emit8(0xC0); // setb al
+                self.emit8(0x40); self.emit8(0x0F); self.emit8(0x90); self.emit8(0xC6); // seto sil
+            }
+            Opcode::Sub => {
+                self.emit8(0x0F); self.emit8(0x93); self.emit8(0xC0); // setae al = ARM C (no borrow)
+                self.emit8(0x40); self.emit8(0x0F); self.emit8(0x90); self.emit8(0xC6); // seto sil
+            }
+            Opcode::And => {
+                self.emit8(0x31); self.emit8(0xC0); // C=0; this is safe because N/Z are already captured and C/V are architectural zero.
+                self.emit8(0x31); self.emit8(0xF6); // V=0
+            }
+            _ => unreachable!(),
+        }
+
+        // Materialize ARM's NZCV in bits 31:28.
+        self.emit8(0x0F); self.emit8(0xB6); self.emit8(0xD2); // movzx edx, dl
+        self.emit8(0xC1); self.emit8(0xE2); self.emit8(0x1F); // shl edx,31
+        self.emit8(0x0F); self.emit8(0xB6); self.emit8(0xC9); // movzx ecx, cl
+        self.emit8(0xC1); self.emit8(0xE1); self.emit8(0x1E); // shl ecx,30
+        self.emit8(0x09); self.emit8(0xCA); // or edx, ecx
+        self.emit8(0x0F); self.emit8(0xB6); self.emit8(0xC0); // movzx eax, al
+        self.emit8(0xC1); self.emit8(0xE0); self.emit8(0x1D); // shl eax,29
+        self.emit8(0x09); self.emit8(0xC2); // or edx, eax
+        self.emit8(0x40); self.emit8(0x0F); self.emit8(0xB6); self.emit8(0xF6); // movzx esi, sil
+        self.emit8(0xC1); self.emit8(0xE6); self.emit8(0x1C); // shl esi,28
+        self.emit8(0x09); self.emit8(0xF2); // or edx, esi
         self.mov_store(NZCV_OFFSET, X86Scratch::Rdx, RegWidth::W32);
     }
 
@@ -97,7 +130,7 @@ impl CodeBuffer {
     fn shift_imm(&mut self, reg: X86Scratch, kind: ShiftKind, amount: u8, width: RegWidth) {
         if amount == 0 { return; }
         self.rex(width == RegWidth::X64); self.emit8(0xC1);
-        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9, (X86Scratch::Rdx, ShiftKind::Lsl) => 0xE2, (X86Scratch::Rdx, ShiftKind::Lsr) => 0xEA, (X86Scratch::Rdx, ShiftKind::Asr) => 0xFA, (X86Scratch::Rdx, ShiftKind::Ror) => 0xCA };
+        let rm = match (reg, kind) { (X86Scratch::Rax, ShiftKind::Lsl) => 0xE0, (X86Scratch::Rax, ShiftKind::Lsr) => 0xE8, (X86Scratch::Rax, ShiftKind::Asr) => 0xF8, (X86Scratch::Rax, ShiftKind::Ror) => 0xC8, (X86Scratch::Rcx, ShiftKind::Lsl) => 0xE1, (X86Scratch::Rcx, ShiftKind::Lsr) => 0xE9, (X86Scratch::Rcx, ShiftKind::Asr) => 0xF9, (X86Scratch::Rcx, ShiftKind::Ror) => 0xC9, (X86Scratch::Rdx, ShiftKind::Lsl) => 0xE2, (X86Scratch::Rdx, ShiftKind::Lsr) => 0xEA, (X86Scratch::Rdx, ShiftKind::Asr) => 0xFA, (X86Scratch::Rdx, ShiftKind::Ror) => 0xCA, (X86Scratch::Rsi, ShiftKind::Lsl) => 0xE6, (X86Scratch::Rsi, ShiftKind::Lsr) => 0xEE, (X86Scratch::Rsi, ShiftKind::Asr) => 0xFE, (X86Scratch::Rsi, ShiftKind::Ror) => 0xCE };
         self.emit8(rm); self.emit8(amount);
     }
 
@@ -132,12 +165,13 @@ impl CodeBuffer {
     #[inline]
     fn emit_branch_cond(&mut self, target: u64, condition: u64, fallthrough: u64) -> Result<(), CodegenError> {
         if condition > 15 { return Err(CodegenError::UnsupportedOperand); }
-        let tables: [u16; 16] = [0xF0F0, 0xCCCC, 0xFCFC, 0xFF00, 0xAAAA, 0x3333, 0x0F0F, 0x0303, 0xAA55, 0x55AA, 0x0A05, 0xF5FA, 0xFFFF, 0x0000, 0x0C0C, 0xF3F3];
+        const SET_PC_RET_LEN: u8 = 18;
+        const COND_TABLES: [u16; 16] = build_condition_tables();
         self.mov_load(X86Scratch::Rax, NZCV_OFFSET, RegWidth::W32);
-        self.emit8(0xC1); self.emit8(0xE8); self.emit8(0x1C); // shr eax, 28
-        self.mov_imm(X86Scratch::Rcx, tables[condition as usize] as u64, RegWidth::W32);
-        self.emit8(0x66); self.emit8(0x0F); self.emit8(0xA3); self.emit8(0xC1); // bt cx, ax
-        self.emit8(0x73); self.emit8(0x12); // jnc skip taken
+        self.emit8(0xC1); self.emit8(0xE8); self.emit8(0x1C); // shr eax,28
+        self.mov_imm(X86Scratch::Rcx, COND_TABLES[condition as usize] as u64, RegWidth::W32);
+        self.emit8(0x66); self.emit8(0x0F); self.emit8(0xA3); self.emit8(0xC1); // bt cx,ax
+        self.emit8(0x73); self.emit8(SET_PC_RET_LEN); // jnc skip taken
         self.emit_set_pc_imm(target); self.emit8(0xC3);
         self.emit_set_pc_imm(fallthrough); self.emit8(0xC3);
         Ok(())
@@ -156,8 +190,12 @@ impl CodeBuffer {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
                     self.load_operand(inst.b, X86Scratch::Rax, dest.width)?; self.load_operand(inst.c, X86Scratch::Rcx, dest.width)?;
                     self.binop(inst.opcode, dest.width);
-                    if inst.flags != 0 { self.emit_nzcv_from_x86_flags(); }
-                    self.store_state(dest, X86Scratch::Rax);
+                    if inst.flags != 0 {
+                        self.store_state(dest, X86Scratch::Rax);
+                        self.emit_nzcv_from_x86_flags(inst.opcode);
+                    } else {
+                        self.store_state(dest, X86Scratch::Rax);
+                    }
                 }
                 Opcode::Shift => {
                     let dest = match inst.a { Operand::Reg(g) => g, _ => return Err(CodegenError::UnsupportedOperand) };
@@ -183,8 +221,8 @@ impl CodeBuffer {
                         (Operand::Imm(cond), Operand::None) => self.emit_branch_cond(target, cond, fallthrough)?,
                         (Operand::Reg(reg), Operand::Imm(kind)) if kind <= 1 => {
                             self.load_state(X86Scratch::Rax, reg);
-                            self.rex(reg.width == RegWidth::X64); self.emit8(0x85); self.emit8(0xC0); // test rax/eax
-                            self.emit8(if kind == 0 { 0x75 } else { 0x74 }); self.emit8(0x12);
+                            self.rex(reg.width == RegWidth::X64); self.emit8(0x85); self.emit8(0xC0);
+                            self.emit8(if kind == 0 { 0x75 } else { 0x74 }); self.emit8(SET_PC_RET_LEN);
                             self.emit_set_pc_imm(target); self.emit8(0xC3);
                             self.emit_set_pc_imm(fallthrough); self.emit8(0xC3);
                         }
@@ -208,7 +246,53 @@ impl CodeBuffer {
     pub fn into_executable(self) -> Result<ExecutableCode, std::io::Error> { ExecutableCode::from_bytes(&self.bytes) }
 }
 
-#[derive(Clone, Copy)] enum X86Scratch { Rax, Rcx, Rdx }
+const fn condition_holds(cond: usize, nzcv: usize) -> bool {
+    let n = (nzcv & 8) != 0;
+    let z = (nzcv & 4) != 0;
+    let c = (nzcv & 2) != 0;
+    let v = (nzcv & 1) != 0;
+    match cond {
+        0 => z,
+        1 => !z,
+        2 => c,
+        3 => !c,
+        4 => n,
+        5 => !n,
+        6 => v,
+        7 => !v,
+        8 => c && !z,
+        9 => !c || z,
+        10 => n == v,
+        11 => n != v,
+        12 => !z && (n == v),
+        13 => z || (n != v),
+        14 => true,
+        15 => false,
+        _ => false,
+    }
+}
+
+const fn condition_truth_table(cond: usize) -> u16 {
+    let mut table = 0u16;
+    let mut nzcv = 0usize;
+    while nzcv < 16 {
+        if condition_holds(cond, nzcv) { table |= 1u16 << nzcv; }
+        nzcv += 1;
+    }
+    table
+}
+
+const fn build_condition_tables() -> [u16; 16] {
+    let mut tables = [0u16; 16];
+    let mut cond = 0usize;
+    while cond < 16 {
+        tables[cond] = condition_truth_table(cond);
+        cond += 1;
+    }
+    tables
+}
+
+#[derive(Clone, Copy)] enum X86Scratch { Rax, Rcx, Rdx, Rsi }
 
 pub struct ExecutableCode { mapping: Mmap, entry: GuestFn }
 
@@ -222,4 +306,82 @@ impl ExecutableCode {
     }
     #[inline] pub fn entry(&self) -> GuestFn { self.entry }
     #[inline] pub fn len(&self) -> usize { self.mapping.len() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(block: &Block, state: &mut GuestState) {
+        let mut buffer = CodeBuffer::new();
+        buffer.emit_block(block).expect("codegen");
+        let code = buffer.into_executable().expect("executable mapping");
+        unsafe { (code.entry())(state as *mut GuestState); }
+    }
+
+    fn arithmetic_block(opcode: Opcode, lhs: Operand, rhs: Operand, width: RegWidth) -> Block {
+        let mut block = Block::at(0x1000);
+        block.push(IRInst { opcode, flags: FLAG_WRITES_NZCV, a: Operand::Reg(GuestReg { num: 0, width, kind: RegKind::General }), b: lhs, c: rhs });
+        block
+    }
+
+    #[test]
+    fn adds_materializes_nzcv() {
+        let mut state = GuestState::new();
+        state.gpr[0] = u64::MAX;
+        let block = arithmetic_block(Opcode::Add, Operand::Reg(GuestReg::x(0)), Operand::Imm(1), RegWidth::X64);
+        run(&block, &mut state);
+        assert_eq!(state.gpr[0], 0);
+        assert_eq!(state.nzcv, 0x6000_0000); // Z=1, C=1
+    }
+
+    #[test]
+    fn subs_materializes_no_borrow_carry() {
+        let mut state = GuestState::new();
+        state.gpr[0] = 0;
+        let block = arithmetic_block(Opcode::Sub, Operand::Reg(GuestReg::x(0)), Operand::Imm(1), RegWidth::X64);
+        run(&block, &mut state);
+        assert_eq!(state.gpr[0], u64::MAX);
+        assert_eq!(state.nzcv, 0x8000_0000); // N=1, C=0
+    }
+
+    #[test]
+    fn ands_sets_only_nz() {
+        let mut state = GuestState::new();
+        state.gpr[0] = 0x8000_0000_0000_0000;
+        let block = arithmetic_block(Opcode::And, Operand::Reg(GuestReg::x(0)), Operand::Imm(0xffff_ffff_ffff_ffff), RegWidth::X64);
+        run(&block, &mut state);
+        assert_eq!(state.nzcv, 0x8000_0000); // N=1, C=V=0
+    }
+
+    #[test]
+    fn conditional_branches_cover_all_conditions() {
+        for cond in 0u64..16 {
+            for nzcv_nibble in 0usize..16 {
+                let mut state = GuestState::new();
+                state.nzcv = (nzcv_nibble as u32) << 28;
+                let mut block = Block::at(0x1000);
+                block.push(IRInst { opcode: Opcode::BranchCond, flags: 0, a: Operand::GuestPc(0x2000), b: Operand::Imm(cond), c: Operand::None });
+                run(&block, &mut state);
+                let expected = condition_holds(cond as usize, nzcv_nibble);
+                assert_eq!(state.pc, if expected { 0x2000 } else { 0x1004 }, "cond={cond} nzcv={nzcv_nibble:x}");
+            }
+        }
+    }
+
+    #[test]
+    fn cbz_and_cbnz_w32_use_low_32_bits() {
+        let mut cbz = Block::at(0x1000);
+        cbz.push(IRInst { opcode: Opcode::BranchCond, flags: 0, a: Operand::GuestPc(0x2000), b: Operand::Reg(GuestReg::w(0)), c: Operand::Imm(0) });
+        let mut state = GuestState::new();
+        state.gpr[0] = 0x1_0000_0000;
+        run(&cbz, &mut state);
+        assert_eq!(state.pc, 0x2000);
+
+        let mut cbnz = Block::at(0x1000);
+        cbnz.push(IRInst { opcode: Opcode::BranchCond, flags: 0, a: Operand::GuestPc(0x2000), b: Operand::Reg(GuestReg::w(0)), c: Operand::Imm(1) });
+        state.gpr[0] = 0x1_0000_0000;
+        run(&cbnz, &mut state);
+        assert_eq!(state.pc, 0x1004);
+    }
 }
