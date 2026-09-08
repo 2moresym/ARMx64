@@ -3,11 +3,14 @@ use std::thread::{self, JoinHandle};
 
 use crate::codegen::{CodeBuffer, ExecutableCode};
 use crate::ir::Block;
+use crate::jit::prepare_block;
 
 pub struct CompileRequest { pub pc: u64, pub block: Block }
 pub struct CompiledBlock { pub pc: u64, pub code: ExecutableCode }
 
 /// Background tier-1 compiler. The guest execution thread only enqueues work.
+/// Compilation itself follows the same optimizer/selector pipeline as eager
+/// compilation, keeping both paths semantically identical.
 pub struct BackgroundCompiler {
     tx: Option<Sender<CompileRequest>>,
     join: Option<JoinHandle<()>>,
@@ -18,7 +21,8 @@ impl BackgroundCompiler {
         let (tx, rx) = mpsc::channel::<CompileRequest>();
         let (result_tx, result_rx) = mpsc::channel::<CompiledBlock>();
         let join = thread::Builder::new().name("armx64-compiler".into()).spawn(move || {
-            while let Ok(request) = rx.recv() {
+            while let Ok(mut request) = rx.recv() {
+                prepare_block(&mut request.block);
                 let mut buffer = CodeBuffer::new();
                 let Ok(()) = buffer.emit_block(&request.block) else { continue };
                 let Ok(code) = buffer.into_executable() else { continue };
