@@ -31,7 +31,17 @@ fn is_immediate_candidate(inst: &IRInst) -> bool {
     if !matches!(inst.opcode, Opcode::Add | Opcode::Sub | Opcode::And | Opcode::Orr | Opcode::Eor) { return false; }
     let width = match inst.a { Operand::Reg(reg) => reg.width, _ => return false };
     let value = match inst.c { Operand::Imm(value) => value, _ => return false };
-    match width { RegWidth::W32 => value <= u32::MAX as u64, RegWidth::X64 => (value as i32 as i64 as u64) == value }
+    match width {
+        RegWidth::W32 => value <= u32::MAX as u64,
+        RegWidth::X64 => match inst.opcode {
+            Opcode::Add | Opcode::Sub => (value as i32 as i64 as u64) == value,
+            // x86-64's logical imm32 is sign-extended. ARM logical immediates
+            // are zero-extended, so only the non-negative signed-32 range is
+            // directly representable without changing the value.
+            Opcode::And | Opcode::Orr | Opcode::Eor => value <= i32::MAX as u64,
+            _ => false,
+        },
+    }
 }
 
 #[inline]
@@ -54,7 +64,7 @@ mod tests {
 
     #[test] fn selects_add_immediate() { assert!(select(Opcode::Add, RegWidth::X64, 7, 0)); }
     #[test] fn selects_logical_immediates() { assert!(select(Opcode::Orr, RegWidth::W32, 0xff, 0)); assert!(select(Opcode::Eor, RegWidth::W32, 0xff, 0)); }
-    #[test] fn rejects_non_sign_extended_x64_immediate() { assert!(!select(Opcode::Add, RegWidth::X64, 0x8000_0000, 0)); }
+    #[test] fn rejects_non_sign_extended_x64_immediate() { assert!(!select(Opcode::Add, RegWidth::X64, 0x8000_0000, 0)); assert!(!select(Opcode::Orr, RegWidth::X64, 0xffff_ffff, 0)); }
     #[test] fn preserves_nzcv_bit() {
         let mut block = Block::at(0x1000);
         block.push(IRInst { opcode: Opcode::Sub, flags: FLAG_WRITES_NZCV, a: Operand::Reg(GuestReg::x(0)), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(1) });
