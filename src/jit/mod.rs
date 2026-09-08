@@ -7,7 +7,7 @@ mod optimizer;
 pub use cache::CodeCache;
 pub use compiler::{BackgroundCompiler, CompileRequest, CompiledBlock};
 pub use hotness::Hotness;
-pub use isel::{InstructionSelector, InstForm, Selection, FLAG_X86_IMM_FORM};
+pub use isel::{InstructionSelector, InstForm, Selection};
 pub use optimizer::Optimizer;
 
 /// Run the target-independent optimizer followed by target-aware instruction
