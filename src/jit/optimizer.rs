@@ -67,7 +67,25 @@ impl Optimizer {
 #[inline] fn mask_width(value: u64, width: RegWidth) -> u64 { match width { RegWidth::W32 => value as u32 as u64, RegWidth::X64 => value } }
 #[inline] fn fold_binop(op: Opcode, lhs: u64, rhs: u64, width: RegWidth) -> u64 { let value = match op { Opcode::Add => lhs.wrapping_add(rhs), Opcode::Sub => lhs.wrapping_sub(rhs), Opcode::And => lhs & rhs, Opcode::Orr => lhs | rhs, Opcode::Eor => lhs ^ rhs, _ => unreachable!() }; mask_width(value, width) }
 #[inline] fn fold_shift(value: u64, amount: u64, kind: ShiftKind, width: RegWidth) -> u64 { let bits = match width { RegWidth::W32 => 32, RegWidth::X64 => 64 }; let value = mask_width(value, width); let shift = (amount as u32) & (bits - 1); let result = match kind { ShiftKind::Lsl => value.wrapping_shl(shift), ShiftKind::Lsr => value.wrapping_shr(shift), ShiftKind::Asr => match width { RegWidth::W32 => ((value as u32 as i32) >> shift) as u32 as u64, RegWidth::X64 => ((value as i64) >> shift) as u64 }, ShiftKind::Ror => value.rotate_right(shift) }; mask_width(result, width) }
-#[inline] fn simplify_identity(inst: &mut IRInst, width: RegWidth) -> bool { match (inst.opcode, inst.b, inst.c) { (Opcode::Add, lhs, Operand::Imm(0)) | (Opcode::Sub, lhs, Operand::Imm(0)) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }, (Opcode::And, lhs, Operand::Imm(v)) if mask_width(v, width) == mask_width(u64::MAX, width) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }, (Opcode::Orr, lhs, Operand::Imm(0)) | (Opcode::Eor, lhs, Operand::Imm(0)) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }, _ => false } }
+
+/// Apply algebraic identities that are valid without knowing the source value.
+/// This includes zero-producing operations such as `SUB x,x` and `EOR x,x`.
+#[inline]
+fn simplify_identity(inst: &mut IRInst, width: RegWidth) -> bool {
+    match (inst.opcode, inst.b, inst.c) {
+        (Opcode::Add, lhs, Operand::Imm(0)) | (Opcode::Sub, lhs, Operand::Imm(0)) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }
+        (Opcode::Sub, Operand::Reg(lhs), Operand::Reg(rhs)) if same_general_reg(lhs, rhs) => { inst.opcode = Opcode::Mov; inst.b = Operand::Imm(0); inst.c = Operand::None; true }
+        (Opcode::And, _, Operand::Imm(0)) => { inst.opcode = Opcode::Mov; inst.b = Operand::Imm(0); inst.c = Operand::None; true }
+        (Opcode::And, lhs, Operand::Imm(v)) if mask_width(v, width) == mask_width(u64::MAX, width) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }
+        (Opcode::Orr, _, Operand::Imm(v)) if mask_width(v, width) == mask_width(u64::MAX, width) => { inst.opcode = Opcode::Mov; inst.b = Operand::Imm(mask_width(u64::MAX, width)); inst.c = Operand::None; true }
+        (Opcode::Orr, lhs, Operand::Imm(0)) | (Opcode::Eor, lhs, Operand::Imm(0)) => { inst.opcode = Opcode::Mov; inst.b = lhs; inst.c = Operand::None; true }
+        (Opcode::Eor, Operand::Reg(lhs), Operand::Reg(rhs)) if same_general_reg(lhs, rhs) => { inst.opcode = Opcode::Mov; inst.b = Operand::Imm(0); inst.c = Operand::None; true }
+        (Opcode::Shift, lhs, Operand::ShiftReg { amount, kind, .. }) if matches!(kind, ShiftKind::Lsl | ShiftKind::Lsr | ShiftKind::Asr | ShiftKind::Ror) && matches!(amount, GuestReg { .. }) => false,
+        _ => false,
+    }
+}
+
+#[inline] fn same_general_reg(a: GuestReg, b: GuestReg) -> bool { a.kind == RegKind::General && b.kind == RegKind::General && a.num == b.num && a.width == b.width }
 #[inline] fn invalidate_dest(op: Operand, constants: &mut [Option<u64>; 31]) { if let Operand::Reg(GuestReg { num, kind: RegKind::General, .. }) = op { constants[num as usize] = None; } }
 
 #[cfg(test)]
@@ -80,4 +98,6 @@ mod tests {
     #[test] fn preserves_flag_writers() { let mut block = Block::at(0x1000); block.push(IRInst { opcode: Opcode::Add, flags: FLAG_WRITES_NZCV, a: Operand::Reg(GuestReg::x(0)), b: Operand::Imm(1), c: Operand::Imm(2) }); let mut opt = Optimizer::default(); opt.optimize_block(&mut block); assert_eq!(block.insts[0].opcode, Opcode::Add); assert_eq!(block.insts[0].flags, FLAG_WRITES_NZCV); }
     #[test] fn simplifies_identity_without_deleting_guest_slots() { let mut block = Block::at(0x1000); block.push(IRInst { opcode: Opcode::Nop, flags: 0, a: Operand::None, b: Operand::None, c: Operand::None }); block.push(IRInst { opcode: Opcode::Add, flags: 0, a: Operand::Reg(GuestReg::x(0)), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(0) }); let mut opt = Optimizer::default(); opt.optimize_block(&mut block); assert_eq!(block.insts.len(), 2); assert_eq!(block.insts[1].opcode, Opcode::Mov); assert_eq!(block.byte_len(), 8); }
     #[test] fn folds_variable_shift_when_amount_is_constant() { let mut block = Block::at(0x1000); block.push(IRInst { opcode: Opcode::Mov, flags: 0, a: Operand::Reg(GuestReg::x(0)), b: Operand::Imm(1), c: Operand::None }); block.push(IRInst { opcode: Opcode::Mov, flags: 0, a: Operand::Reg(GuestReg::x(1)), b: Operand::Imm(4), c: Operand::None }); block.push(IRInst { opcode: Opcode::Shift, flags: 0, a: Operand::Reg(GuestReg::x(2)), b: Operand::Reg(GuestReg::x(0)), c: Operand::ShiftReg { value: GuestReg::x(0), amount: GuestReg::x(1), kind: ShiftKind::Lsl } }); let mut opt = Optimizer::default(); opt.optimize_block(&mut block); assert_eq!(block.insts[2].opcode, Opcode::Mov); assert_eq!(block.insts[2].b, Operand::Imm(16)); }
+    #[test] fn simplifies_xor_self_to_zero() { let mut block = Block::at(0x1000); block.push(IRInst { opcode: Opcode::Eor, flags: 0, a: Operand::Reg(GuestReg::x(2)), b: Operand::Reg(GuestReg::x(2)), c: Operand::Reg(GuestReg::x(2)) }); let mut opt = Optimizer::default(); opt.optimize_block(&mut block); assert_eq!(block.insts[0].opcode, Opcode::Mov); assert_eq!(block.insts[0].b, Operand::Imm(0)); }
+    #[test] fn simplifies_sub_self_to_zero() { let mut block = Block::at(0x1000); block.push(IRInst { opcode: Opcode::Sub, flags: 0, a: Operand::Reg(GuestReg::x(2)), b: Operand::Reg(GuestReg::x(2)), c: Operand::Reg(GuestReg::x(2)) }); let mut opt = Optimizer::default(); opt.optimize_block(&mut block); assert_eq!(block.insts[0].opcode, Opcode::Mov); assert_eq!(block.insts[0].b, Operand::Imm(0)); }
 }
