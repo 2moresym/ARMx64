@@ -76,10 +76,62 @@ fn variable_shift_operands(decoded: &yaxpeax_arm::armv8::a64::Instruction, kind:
 }
 
 #[inline]
+fn sign_extend_19(value: u32) -> i64 {
+    let value = ((value & 0x7ffff) as i64) << 2;
+    (value << 43) >> 43
+}
+
+#[inline]
+fn lift_conditional_branch(inst: A64Inst, guest_pc: u64, block: &mut Block) -> bool {
+    let word = inst.0;
+
+    // B.cond: 01010100 imm19 0 cond
+    if (word & 0xff00_0010) == 0x5400_0000 {
+        let offset = sign_extend_19(word >> 5);
+        let target = ((guest_pc as i64).wrapping_add(offset)) as u64;
+        let cond = word & 0xf;
+        block.push(IRInst {
+            opcode: Opcode::BranchCond,
+            flags: 0,
+            a: Operand::GuestPc(target),
+            b: Operand::Imm(cond as u64),
+            c: Operand::None,
+        });
+        return true;
+    }
+
+    // CBZ/CBNZ: 0011010/0011011 imm19 Rt (W/X selected by bit 31).
+    let cb_class = word & 0x7f00_0000;
+    if cb_class == 0x3400_0000 || cb_class == 0x3500_0000 {
+        let width = if (word & (1 << 31)) != 0 { RegWidth::X64 } else { RegWidth::W32 };
+        let rt = (word & 0x1f) as u8;
+        let reg = Operand::Reg(GuestReg {
+            num: rt,
+            width,
+            kind: if rt == 31 { RegKind::Zero } else { RegKind::General },
+        });
+        let offset = sign_extend_19(word >> 5);
+        let target = ((guest_pc as i64).wrapping_add(offset)) as u64;
+        let cbnz = cb_class == 0x3500_0000;
+        block.push(IRInst {
+            opcode: Opcode::BranchCond,
+            flags: 0,
+            a: Operand::GuestPc(target),
+            b: reg,
+            c: Operand::Imm(cbnz as u64),
+        });
+        return true;
+    }
+
+    false
+}
+
+#[inline]
 pub fn lift_one(inst: A64Inst, block: &mut Block) { lift_one_at(inst, block.guest_pc + (block.insts.len() as u64 * 4), block) }
 
 #[inline]
 pub fn lift_one_at(inst: A64Inst, guest_pc: u64, block: &mut Block) {
+    if lift_conditional_branch(inst, guest_pc, block) { return; }
     if let Some((a, b)) = lower_unsigned_mem(inst, true) { block.push(IRInst { opcode: Opcode::Load, flags: 0, a, b, c: Operand::None }); return; }
     if let Some((a, b)) = lower_unsigned_mem(inst, false) { block.push(IRInst { opcode: Opcode::Store, flags: 0, a, b, c: Operand::None }); return; }
     let decoded = match aarch64::decode(inst) { Ok(d) => d, Err(_) => { unsupported(inst, block); return; } };
@@ -110,4 +162,27 @@ mod tests {
     #[test] fn sp_is_only_register_31() { let mut block = Block::new(); lift_one(A64Inst(0x91002000), &mut block); match block.insts[0].a { Operand::Reg(r) => assert_eq!(r.kind, RegKind::General), _ => panic!() } }
     #[test] fn nop_encoding_is_recognized() { let mut block = Block::new(); lift_one(A64Inst(0xd503_201f), &mut block); assert_eq!(block.insts[0].opcode, Opcode::Nop); }
     #[test] fn direct_branch_target_is_absolute_guest_pc() { let mut block = Block::at(0x1000); lift_one_at(A64Inst(0x14000000), 0x1000, &mut block); assert_eq!(block.insts[0].a, Operand::GuestPc(0x1000)); }
+    #[test] fn conditional_branch_is_absolute_and_terminal() {
+        let mut block = Block::at(0x1000);
+        // b.ne +8
+        lift_one_at(A64Inst(0x54000041), 0x1000, &mut block);
+        assert_eq!(block.insts[0].opcode, Opcode::BranchCond);
+        assert_eq!(block.insts[0].a, Operand::GuestPc(0x1008));
+        assert_eq!(block.insts[0].b, Operand::Imm(1));
+    }
+    #[test] fn conditional_branch_negative_displacement() {
+        let mut block = Block::at(0x2000);
+        // b.ne -4 (imm19 = 0x7ffff)
+        lift_one_at(A64Inst(0x54ffffe1), 0x2000, &mut block);
+        assert_eq!(block.insts[0].a, Operand::GuestPc(0x1ffc));
+    }
+    #[test] fn cbz_lifts_register_and_target() {
+        let mut block = Block::at(0x2000);
+        // cbz x0, +8
+        lift_one_at(A64Inst(0xb4000040), 0x2000, &mut block);
+        assert_eq!(block.insts[0].opcode, Opcode::BranchCond);
+        assert_eq!(block.insts[0].a, Operand::GuestPc(0x2008));
+        assert_eq!(block.insts[0].b, Operand::Reg(GuestReg::x(0)));
+        assert_eq!(block.insts[0].c, Operand::Imm(0));
+    }
 }

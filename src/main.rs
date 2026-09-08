@@ -21,7 +21,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.next().ok_or_else(|| format!("usage: {} <aarch64-elf> [x0]", program.to_string_lossy()))?;
     let x0 = args.next().map(|value| value.to_string_lossy().parse::<u64>()).transpose()?;
 
-    let mut image = elf::load(&path)?;
+    let image = elf::load(&path)?;
     println!("ARMx64 v{}", env!("CARGO_PKG_VERSION"));
     println!("AArch64 ELF -> ARMx64 IR -> x86-64");
     println!("ELF entry: {:#x}", image.entry);
