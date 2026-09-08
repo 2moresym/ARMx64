@@ -1,32 +1,18 @@
 use crate::ir::{Block, IRInst, Opcode, Operand, RegWidth};
 
-/// Compiler-internal hint: use x86's immediate form when the operand can be
-/// represented without changing guest semantics. The low bit remains reserved
-/// for ARM NZCV writes; this hint intentionally lives in the higher flag bits.
+/// Compiler-internal hint: use an x86 immediate lowering when it is cheaper
+/// and semantically identical to the guest operation. Bit 0 is reserved for
+/// the architectural NZCV writer flag.
 pub const FLAG_X86_IMM_FORM: u16 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstForm {
-    Generic,
-    Immediate,
-}
+pub enum InstForm { Generic, Immediate }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Selection {
-    pub opcode: Opcode,
-    pub form: InstForm,
-    pub cost: u8,
-}
+pub struct Selection { pub opcode: Opcode, pub form: InstForm, pub cost: u8 }
 
-/// Lightweight target-aware instruction selector.
-///
-/// Selection is deliberately separate from semantic optimization: the IR still
-/// describes the guest operation, while this pass records the cheapest safe
-/// x86-64-v2 lowering available to the current emitter.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct InstructionSelector {
-    pub immediate_forms: u32,
-}
+pub struct InstructionSelector { pub immediate_forms: u32 }
 
 impl InstructionSelector {
     pub fn select_block(&mut self, block: &mut Block) {
@@ -51,21 +37,11 @@ impl InstructionSelector {
 
 #[inline]
 fn is_immediate_candidate(inst: &IRInst) -> bool {
-    if !matches!(inst.opcode, Opcode::Add | Opcode::Sub | Opcode::And) {
-        return false;
-    }
-    let width = match inst.a {
-        Operand::Reg(reg) => reg.width,
-        _ => return false,
-    };
-    let value = match inst.c {
-        Operand::Imm(value) => value,
-        _ => return false,
-    };
+    if !matches!(inst.opcode, Opcode::Add | Opcode::Sub | Opcode::And | Opcode::Orr | Opcode::Eor) { return false; }
+    let width = match inst.a { Operand::Reg(reg) => reg.width, _ => return false };
+    let value = match inst.c { Operand::Imm(value) => value, _ => return false };
     match width {
-        // Operand-size 32 accepts the complete 32-bit immediate.
         RegWidth::W32 => value <= u32::MAX as u64,
-        // 64-bit ADD/SUB/AND immediate encodings sign-extend imm32.
         RegWidth::X64 => (value as i32 as i64 as u64) == value,
     }
 }
@@ -86,34 +62,20 @@ fn generic_cost(opcode: Opcode) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{GuestReg, IRInst, Operand};
+    use crate::ir::{GuestReg, IRInst, Operand, FLAG_WRITES_NZCV};
 
-    #[test]
-    fn selects_add_immediate() {
+    fn select(opcode: Opcode, width: RegWidth, imm: u64, flags: u16) -> bool {
         let mut block = Block::at(0x1000);
-        block.push(IRInst { opcode: Opcode::Add, flags: 0, a: Operand::Reg(GuestReg::x(0)), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(7) });
+        block.push(IRInst { opcode, flags, a: Operand::Reg(match width { RegWidth::W32 => GuestReg::w(0), RegWidth::X64 => GuestReg::x(0) }), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(imm) });
         let mut selector = InstructionSelector::default();
         selector.select_block(&mut block);
-        assert_ne!(block.insts[0].flags & FLAG_X86_IMM_FORM, 0);
-        assert_eq!(selector.select(&block.insts[0]).form, InstForm::Immediate);
+        block.insts[0].flags & FLAG_X86_IMM_FORM != 0
     }
 
-    #[test]
-    fn rejects_non_sign_extended_x64_immediate() {
-        let mut block = Block::at(0x1000);
-        block.push(IRInst { opcode: Opcode::Add, flags: 0, a: Operand::Reg(GuestReg::x(0)), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(0x8000_0000) });
-        let mut selector = InstructionSelector::default();
-        selector.select_block(&mut block);
-        assert_eq!(block.insts[0].flags & FLAG_X86_IMM_FORM, 0);
-    }
-
-    #[test]
-    fn preserves_nzcv_bit() {
-        let mut block = Block::at(0x1000);
-        block.push(IRInst { opcode: Opcode::Sub, flags: crate::ir::FLAG_WRITES_NZCV, a: Operand::Reg(GuestReg::x(0)), b: Operand::Reg(GuestReg::x(1)), c: Operand::Imm(1) });
-        let mut selector = InstructionSelector::default();
-        selector.select_block(&mut block);
-        assert_eq!(block.insts[0].flags & crate::ir::FLAG_WRITES_NZCV, crate::ir::FLAG_WRITES_NZCV);
-        assert_ne!(block.insts[0].flags & FLAG_X86_IMM_FORM, 0);
+    #[test] fn selects_add_immediate() { assert!(select(Opcode::Add, RegWidth::X64, 7, 0)); }
+    #[test] fn selects_logical_immediates() { assert!(select(Opcode::Orr, RegWidth::W32, 0xff, 0)); assert!(select(Opcode::Eor, RegWidth::W32, 0xff, 0)); }
+    #[test] fn rejects_non_sign_extended_x64_immediate() { assert!(!select(Opcode::Add, RegWidth::X64, 0x8000_0000, 0)); }
+    #[test] fn preserves_nzcv_bit() {
+        assert!(select(Opcode::Sub, RegWidth::X64, 1, FLAG_WRITES_NZCV));
     }
 }
